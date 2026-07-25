@@ -8,6 +8,8 @@ Le projet fournit :
 - un host de mods natifs avec une ABI C versionnée ;
 - un SDK Rust partagé pour développer des mods sans recopier la logique IL2CPP ;
 - un resolver global de classes, champs et méthodes par signatures structurelles ;
+- un gestionnaire natif `F1` pour activer, désactiver, installer et mettre à jour les mods ;
+- une marketplace pilotée par un simple `marketplace.json` hébergé sur GitHub ;
 - un canal de contrôle permettant de charger, décharger et recharger une DLL ;
 - le mod **Dofus 3 Native Tactical**, activable avec `F8`.
 
@@ -15,6 +17,47 @@ Le projet fournit :
 > Ce projet n’est ni développé, ni approuvé, ni distribué par Ankama. Une mise
 > à jour de Dofus peut casser la compatibilité ou remplacer le `version.dll`
 > installé. Utilisez-le à vos risques et périls.
+
+## Mods
+
+Le host ouvre son gestionnaire avec `F1`. La colonne de gauche affiche les DLL
+déjà installées et permet de les **activer**, **désactiver** ou **recharger**.
+La colonne de droite lit la marketplace GitHub et permet d’**installer** ou de
+**mettre à jour** un mod. Une désactivation est persistante : le mod reste
+présent sur disque, mais le host ne le charge plus aux lancements suivants.
+
+### Dofus 3 Native Tactical
+
+- Inclus dans l’installateur et le ZIP.
+- `F8` active ou désactive le mode tactique sur la carte courante.
+- Utilise le resolver structurel pour survivre aux changements de noms IL2CPP.
+- Charge l’Addressable natif `tacticalCell` et réutilise directement ses
+  sprites de déplacement et d’obstacle de ligne de vue.
+- Instancie les 560 cellules par groupes de 28 afin de répartir le travail sur
+  plusieurs ticks Unity.
+- Code : [mods/native-tactical](https://github.com/AlpaGit/dofus3-native-host/tree/main/mods/native-tactical).
+
+### Dofus Network Dumper
+
+- Installable volontairement depuis la marketplace `F1` ; il n’est pas activé
+  silencieusement par l’installateur.
+- Capture les messages Protobuf entrants et sortants.
+- Retrouve les handlers, getters et méthodes d’envoi par signatures, sans coder
+  les noms obfusqués actuels en dur.
+- Enregistre pour chaque paquet la direction, l’identifiant entrant, le vrai
+  type IL2CPP concret, le payload wire décodé et les octets Protobuf en base64.
+- Sorties : `NativeMods/DofusNetworkDump/packets-*.jsonl` et
+  `NativeMods/DofusNetworkDump/classes-*.json`.
+- Code : [mods/network-dumper](https://github.com/AlpaGit/dofus3-native-host/tree/main/mods/network-dumper).
+
+> [!WARNING]
+> Un dump réseau peut contenir des messages privés ou des données de compte.
+> Ne publiez jamais le dossier `DofusNetworkDump` sans l’avoir relu et nettoyé.
+
+### Native Example
+
+- Petit mod inclus pour vérifier l’ABI et servir de point de départ.
+- Code : [mods/example](https://github.com/AlpaGit/dofus3-native-host/tree/main/mods/example).
 
 ## Installation rapide
 
@@ -61,8 +104,13 @@ Dofus-dofus3/
 
 Lancez Dofus normalement depuis l’Ankama Launcher.
 
+Appuyez sur `F1` pour ouvrir le gestionnaire de mods. Les changements
+Activer/Désactiver sont conservés dans `NativeMods/native-mods.json` et restent
+donc appliqués au prochain lancement.
+
 Sur une carte, appuyez sur `F8` pour activer ou désactiver le mode tactique
-natif. Le mod génère les 560 cellules dans un seul mesh Unity.
+natif. Le mod charge le prefab `tacticalCell` du jeu et utilise ses sprites
+originaux au lieu de redessiner les cellules avec un mesh.
 
 ### Installation portable
 
@@ -92,6 +140,7 @@ DofusNativeHost.dll
 NativeMods/DofusNativeExample.dll
 NativeMods/DofusNativeTactical.dll
 NativeMods/native-control.json
+NativeMods/native-mods.json
 ```
 
 Les journaux et dossiers `NativeMods/control` peuvent également être supprimés.
@@ -110,19 +159,45 @@ NativeMods/native-host.log
 Un démarrage sain contient notamment :
 
 ```text
-Dofus Native Host ABI v4 starting
-Dofus 3 Native Tactical negotiated native ABI v4
-Ready. Press F8 to toggle native tactical mode (Rust SDK, pointer-safe ABI v4).
+Dofus Native Host ABI v6 starting
+Dofus 3 Native Tactical negotiated native ABI v6
+native mod manager ready; press F1 to open
+Ready. Press F8 to toggle native tactical mode (Rust SDK, native sprites, ABI v6).
 ```
 
-Si `F8` ne fait rien :
+Si `F1` ou `F8` ne fait rien :
 
 1. vérifiez que les cinq DLL ci-dessus sont au bon endroit ;
 2. vérifiez `NativeMods/native-host.log` ;
 3. réinstallez après toute mise à jour récente de Dofus ;
 4. ouvrez une issue avec le journal, la version du jeu et les étapes exactes.
 
-## Pourquoi une ABI v4 ?
+## Marketplace GitHub
+
+Le gestionnaire télécharge le catalogue public :
+
+```text
+https://raw.githubusercontent.com/AlpaGit/dofus3-native-host/main/marketplace.json
+```
+
+Chaque entrée fournit l’identifiant ABI, le nom de fichier, l’URL HTTPS d’une
+DLL publiée dans une GitHub Release et son SHA-256. Le host télécharge dans un
+fichier temporaire, vérifie le hash avant tout chargement, sauvegarde l’ancienne
+DLL lors d’une mise à jour et la restaure si la nouvelle DLL ne respecte pas
+l’ABI.
+
+Pour publier ou mettre à jour un mod :
+
+1. publiez la DLL dans une GitHub Release ;
+2. calculez son SHA-256 ;
+3. modifiez l’entrée correspondante dans `marketplace.json` ;
+4. vérifiez que `fileName` contient uniquement un nom de DLL, sans chemin.
+
+Le schéma courant est `schemaVersion: 1`. Le workflow de release joint
+automatiquement `DofusNativeTactical.dll`, `DofusNetworkDumper.dll` et leurs
+fichiers `.sha256` aux nouveaux tags.
+
+## Pourquoi une ABI v6 ?
 
 Dofus 3 utilise Unity 6 et IL2CPP. Les noms du code du jeu peuvent être
 obfusqués et changer entre deux builds. L’ABI évite donc de dépendre uniquement
@@ -136,8 +211,12 @@ de noms fragiles :
 - `GCHandle` natifs de taille pointeur.
 
 Unity 6 utilise ici des handles 64 bits. L’ABI v4 les conserve sans troncature.
-Les anciennes tables v2/v3 restent prises en charge au moyen de jetons 32 bits
-gérés par le host.
+L’ABI v5 ajoute un service global de detours natifs avec trampoline, désactivation
+et nettoyage automatique au déchargement d’un mod. C’est ce qui remplace
+Harmony pour le dumper réseau. L’ABI v6 ajoute l’inflation globale des méthodes
+IL2CPP génériques : un mod peut par exemple résoudre
+`LoadAssetAsync<GameObject>` sans MelonLoader ni nom obfusqué. Les anciennes
+tables v1 à v5 restent prises en charge.
 
 ## Développer un mod en Rust
 
@@ -211,26 +290,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-## Harness Unity
-
-`unity-harness` est un projet Unity 6 contrôlé qui valide la chaîne :
-
-```text
-version.dll
-  -> DofusNativeBootstrap.dll
-  -> DofusNativeHost.dll
-  -> NativeMods/*.dll
-```
-
-Avec Unity 6.0 LTS et Windows IL2CPP Build Support installés :
-
-```powershell
-.\build-unity-harness.ps1
-```
-
-Le player est produit dans
-`unity-harness/Build/Windows/DofusNativeHarness.exe`.
-
 ## Contrôle externe et MCP
 
 À chaque démarrage, le host publie :
@@ -258,7 +317,12 @@ Une DLL de mod s’exécute dans le processus Dofus et possède les mêmes droit
 le jeu. N’installez que des mods dont vous connaissez la provenance. Le host
 valide le contrat ABI, mais ne constitue pas une sandbox.
 
+Les captures de `Dofus Network Dumper` peuvent contenir des informations
+sensibles. Elles restent locales et ne sont jamais envoyées par le host ou la
+marketplace.
+
 ## Licence
 
 Le code du projet est distribué sous licence MIT. UnityResolve est inclus sous
-sa propre licence MIT, conservée dans `third_party/unityresolve/LICENSE`.
+sa propre licence MIT. MinHook et son wrapper Rust conservent leurs licences
+MIT/BSD. Les textes correspondants sont conservés dans `third_party/`.

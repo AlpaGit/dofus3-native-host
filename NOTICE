@@ -10,3 +10,12 @@ This project contains UnityResolve.hpp:
 
 The upstream license is included at:
 third_party/unityresolve/LICENSE
+
+This project links the minhook Rust wrapper and MinHook:
+  Wrapper: https://github.com/Jakobzs/minhook
+  MinHook: https://github.com/TsudaKageyu/minhook
+  Licenses: MIT and BSD-2-Clause
+
+The upstream licenses are included at:
+third_party/minhook/WRAPPER_LICENSE
+third_party/minhook/LICENSE.txt

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-26T00:00:00Z",
+  "mods": [
+    {
+      "id": "bubble.dofus3.native-tactical",
+      "name": "Dofus 3 Native Tactical",
+      "author": "Bubble",
+      "description": "Mode tactique natif utilisant directement les sprites du prefab Addressable tacticalCell. Le resolver par signatures résiste aux noms IL2CPP obfusqués et F8 active ou désactive le rendu.",
+      "version": "5.0.0",
+      "abiVersion": 6,
+      "fileName": "DofusNativeTactical.dll",
+      "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.2.0/DofusNativeTactical.dll",
+      "sha256": "6774e47cedbc353816cdd270a86f59f07d6dbe4c182e311f1ff9130ad9ee716a",
+      "homepage": "https://github.com/AlpaGit/dofus3-native-host"
+    },
+    {
+      "id": "bubble.dofus3.network-dumper",
+      "name": "Dofus Network Dumper",
+      "author": "Bubble",
+      "description": "Capture les paquets Protobuf entrants et sortants, leur payload wire, leurs octets bruts et le vrai nom de leur classe IL2CPP concrète. Les dumps restent locaux.",
+      "version": "1.0.0",
+      "abiVersion": 5,
+      "fileName": "DofusNetworkDumper.dll",
+      "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.2.0/DofusNetworkDumper.dll",
+      "sha256": "fe4864ecf531b35bd0138bb6f9dbd16010fb6cee4161d5dd644ee3725b8371c3",
+      "homepage": "https://github.com/AlpaGit/dofus3-native-host"
+    }
+  ]
+}

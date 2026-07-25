@@ -14,6 +14,7 @@ namespace {
 std::atomic_bool g_ready{false};
 std::atomic<void*> g_game_assembly{nullptr};
 std::vector<UnityResolve::Class*> g_dynamic_classes;
+std::vector<UnityResolve::Method*> g_dynamic_methods;
 std::atomic_uint32_t g_next_legacy_gc_handle{1};
 std::mutex g_legacy_gc_handles_mutex;
 std::unordered_map<std::uint32_t, std::uintptr_t> g_legacy_gc_handles;
@@ -851,6 +852,80 @@ extern "C" void* dnh_unity_resolve_icall(const char* name) {
     return name == nullptr
         ? nullptr
         : UnityResolve::Invoke<void*>("il2cpp_resolve_icall", name);
+}
+
+extern "C" void* dnh_unity_inflate_generic_method(
+    void* method_handle,
+    void* const* type_arguments,
+    const std::size_t type_argument_count) {
+    if (method_handle == nullptr || type_arguments == nullptr ||
+        type_argument_count == 0 || !dnh_unity_is_ready()) {
+        return nullptr;
+    }
+
+    auto* method = static_cast<UnityResolve::Method*>(method_handle);
+    void* reflection_method = UnityResolve::Invoke<void*>(
+        "il2cpp_method_get_object",
+        method->address,
+        method->klass == nullptr ? nullptr : method->klass->address);
+    if (reflection_method == nullptr) {
+        return nullptr;
+    }
+
+    void* type_class = dnh_unity_get_class("mscorlib.dll", "System", "Type");
+    void* method_info_class =
+        dnh_unity_get_class("mscorlib.dll", "System.Reflection", "MethodInfo");
+    void* make_generic_method =
+        dnh_unity_get_method(method_info_class, "MakeGenericMethod", 1);
+    void* type_array =
+        dnh_unity_array_new(type_class, type_argument_count);
+    auto** type_array_data =
+        static_cast<void**>(dnh_unity_array_data(type_array));
+    if (type_class == nullptr || method_info_class == nullptr ||
+        make_generic_method == nullptr || type_array == nullptr ||
+        type_array_data == nullptr) {
+        return nullptr;
+    }
+
+    for (std::size_t index = 0; index < type_argument_count; ++index) {
+        if (type_arguments[index] == nullptr) {
+            return nullptr;
+        }
+        type_array_data[index] =
+            dnh_unity_class_type_object(type_arguments[index]);
+        if (type_array_data[index] == nullptr) {
+            return nullptr;
+        }
+    }
+
+    void* arguments[]{type_array};
+    void* exception = nullptr;
+    void* inflated_reflection = dnh_unity_runtime_invoke(
+        make_generic_method,
+        reflection_method,
+        arguments,
+        &exception);
+    if (inflated_reflection == nullptr || exception != nullptr) {
+        return nullptr;
+    }
+
+    void* inflated = UnityResolve::Invoke<void*>(
+        "il2cpp_method_get_from_reflection",
+        inflated_reflection);
+    if (inflated == nullptr) {
+        return nullptr;
+    }
+
+    auto* resolved = new UnityResolve::Method{};
+    resolved->address = inflated;
+    resolved->klass = method->klass;
+    resolved->name = method->name;
+    resolved->return_type = method->return_type;
+    resolved->flags = method->flags;
+    resolved->static_function = method->static_function;
+    resolved->function = *static_cast<void**>(inflated);
+    g_dynamic_methods.push_back(resolved);
+    return resolved;
 }
 
 extern "C" std::size_t dnh_unity_find_fields_by_signature(

@@ -1,0 +1,15 @@
+[package]
+name = "dofus-native-network-dumper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+base64 = "0.22"
+dofus-native-mod-api = { path = "../../crates/mod-api" }
+dofus-native-mod-sdk = { path = "../../crates/mod-sdk" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

@@ -1,7 +1,8 @@
 use dofus_native_mod_api::{
-    DNH_ABI_VERSION_4, DNH_MEMBER_STORAGE_INSTANCE, DnhFieldInfoV2, DnhFieldSignatureV3,
-    DnhGcHandleV4, DnhHandle, DnhHostApiV1, DnhHostApiV4, DnhLogLevel, DnhMethodSignatureV3,
-    DnhUnityApiV2, DnhUnityApiV3, DnhUnityApiV4,
+    DNH_ABI_VERSION_4, DNH_ABI_VERSION_5, DNH_ABI_VERSION_6, DNH_MEMBER_STORAGE_INSTANCE, DNH_OK,
+    DnhFieldInfoV2, DnhFieldSignatureV3, DnhGcHandleV4, DnhHandle, DnhHookApiV5, DnhHostApiV1,
+    DnhHostApiV4, DnhHostApiV5, DnhLogLevel, DnhMethodSignatureV3, DnhUnityApiV2, DnhUnityApiV3,
+    DnhUnityApiV4, DnhUnityApiV6,
 };
 use std::ffi::{CStr, c_void};
 use std::mem::{MaybeUninit, size_of};
@@ -25,19 +26,21 @@ unsafe impl Sync for Runtime {}
 impl Runtime {
     /// # Safety
     ///
-    /// `host_api` must be a process-lifetime ABI v4 table supplied by the
+    /// `host_api` must be a process-lifetime ABI v4, v5 or v6 table supplied by the
     /// native host.
     pub unsafe fn bind(host_api: *const DnhHostApiV1) -> Option<Self> {
         let host = NonNull::new(host_api.cast_mut().cast::<DnhHostApiV4>())?;
         let host_ref = unsafe { host.as_ref() };
-        if host_ref.abi_version != DNH_ABI_VERSION_4
-            || host_ref.struct_size < size_of::<DnhHostApiV4>() as u32
+        if !matches!(
+            host_ref.abi_version,
+            DNH_ABI_VERSION_4 | DNH_ABI_VERSION_5 | DNH_ABI_VERSION_6
+        ) || host_ref.struct_size < size_of::<DnhHostApiV4>() as u32
         {
             return None;
         }
         let unity = NonNull::new(host_ref.unity.cast_mut())?;
         let unity_ref = unsafe { unity.as_ref() };
-        if unity_ref.v3.v2.abi_version != DNH_ABI_VERSION_4
+        if unity_ref.v3.v2.abi_version != host_ref.abi_version
             || unity_ref.v3.v2.struct_size < size_of::<DnhUnityApiV2>() as u32
         {
             return None;
@@ -55,6 +58,60 @@ impl Runtime {
 
     pub fn v4(self) -> &'static DnhUnityApiV4 {
         unsafe { self.unity.as_ref() }
+    }
+
+    pub fn v6(self) -> Option<&'static DnhUnityApiV6> {
+        let host = unsafe { self.host.as_ref() };
+        (host.abi_version == DNH_ABI_VERSION_6)
+            .then(|| unsafe { &*self.unity.as_ptr().cast::<DnhUnityApiV6>() })
+    }
+
+    pub fn v5_hooks(self) -> Option<&'static DnhHookApiV5> {
+        let host = unsafe { self.host.as_ref() };
+        if !matches!(host.abi_version, DNH_ABI_VERSION_5 | DNH_ABI_VERSION_6)
+            || host.struct_size < size_of::<DnhHostApiV5>() as u32
+        {
+            return None;
+        }
+        let host_v5 = unsafe { &*self.host.as_ptr().cast::<DnhHostApiV5>() };
+        unsafe { host_v5.hooks.as_ref() }
+            .filter(|hooks| hooks.struct_size >= size_of::<DnhHookApiV5>() as u32)
+    }
+
+    pub fn create_hook(self, target: DnhHandle, detour: DnhHandle) -> Option<DnhHandle> {
+        let hooks = self.v5_hooks()?;
+        let mut original = null_mut();
+        (unsafe { (hooks.create)(target, detour, &mut original) } == DNH_OK).then_some(original)
+    }
+
+    pub fn enable_hook(self, target: DnhHandle) -> bool {
+        self.v5_hooks()
+            .is_some_and(|hooks| unsafe { (hooks.enable)(target) } == DNH_OK)
+    }
+
+    pub fn disable_hook(self, target: DnhHandle) -> bool {
+        self.v5_hooks()
+            .is_some_and(|hooks| unsafe { (hooks.disable)(target) } == DNH_OK)
+    }
+
+    pub fn remove_hook(self, target: DnhHandle) -> bool {
+        self.v5_hooks()
+            .is_some_and(|hooks| unsafe { (hooks.remove)(target) } == DNH_OK)
+    }
+
+    pub fn inflate_generic_method(
+        self,
+        method: DnhHandle,
+        type_arguments: &[DnhHandle],
+    ) -> Option<DnhHandle> {
+        if method.is_null() || type_arguments.is_empty() {
+            return None;
+        }
+        let api = self.v6()?;
+        let inflated = unsafe {
+            (api.inflate_generic_method)(method, type_arguments.as_ptr(), type_arguments.len())
+        };
+        (!inflated.is_null()).then_some(inflated)
     }
 
     pub fn log(self, level: DnhLogLevel, message: &str) {

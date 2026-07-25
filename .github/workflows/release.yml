@@ -25,6 +25,18 @@ jobs:
       - name: Package runtime
         shell: pwsh
         run: |
+          Copy-Item `
+            dist/DofusRuntime/NativeMods/DofusNativeTactical.dll `
+            DofusNativeTactical.dll
+          (Get-FileHash DofusNativeTactical.dll -Algorithm SHA256).Hash.ToLowerInvariant() `
+            + "  DofusNativeTactical.dll" |
+            Set-Content DofusNativeTactical.sha256
+          Copy-Item `
+            dist/NativeMods/DofusNetworkDumper.dll `
+            DofusNetworkDumper.dll
+          (Get-FileHash DofusNetworkDumper.dll -Algorithm SHA256).Hash.ToLowerInvariant() `
+            + "  DofusNetworkDumper.dll" |
+            Set-Content DofusNetworkDumper.sha256
           Compress-Archive `
             -Path dist/DofusRuntime/* `
             -DestinationPath Dofus3NativeHost-windows-x64.zip
@@ -57,5 +69,36 @@ jobs:
             Dofus3NativeHost-windows-x64.sha256 `
             Dofus3NativeHost-Setup-windows-x64.exe `
             Dofus3NativeHost-Setup-windows-x64.sha256 `
+            DofusNativeTactical.dll `
+            DofusNativeTactical.sha256 `
+            DofusNetworkDumper.dll `
+            DofusNetworkDumper.sha256 `
             --generate-notes `
             --title "Dofus 3 Native Host $env:GITHUB_REF_NAME"
+
+      - name: Update marketplace hashes
+        shell: pwsh
+        run: |
+          git fetch origin main
+          git switch --force-create marketplace-update origin/main
+          $catalog = Get-Content marketplace.json -Raw | ConvertFrom-Json
+          $tag = $env:GITHUB_REF_NAME
+          $tactical = $catalog.mods |
+            Where-Object id -eq 'bubble.dofus3.native-tactical'
+          $tactical.downloadUrl = "https://github.com/AlpaGit/dofus3-native-host/releases/download/$tag/DofusNativeTactical.dll"
+          $tactical.sha256 = (Get-FileHash DofusNativeTactical.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          $network = $catalog.mods |
+            Where-Object id -eq 'bubble.dofus3.network-dumper'
+          $network.downloadUrl = "https://github.com/AlpaGit/dofus3-native-host/releases/download/$tag/DofusNetworkDumper.dll"
+          $network.sha256 = (Get-FileHash DofusNetworkDumper.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          $catalog.updatedAt = [DateTimeOffset]::UtcNow.ToString('O')
+          $catalog | ConvertTo-Json -Depth 10 |
+            Set-Content marketplace.json -Encoding utf8
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add marketplace.json
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Update marketplace for $tag [skip ci]"
+            git push origin HEAD:main
+          }

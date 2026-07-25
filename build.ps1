@@ -31,6 +31,9 @@ try {
         (Join-Path $root "target\$profileDirectory\dofus_native_example.dll") `
         (Join-Path $mods "DofusNativeExample.dll")
     Copy-Item -Force `
+        (Join-Path $root "target\$profileDirectory\dofus_native_network_dumper.dll") `
+        (Join-Path $mods "DofusNetworkDumper.dll")
+    Copy-Item -Force `
         (Join-Path $root "target\$profileDirectory\dofus_native_tactical.dll") `
         (Join-Path $mods "DofusNativeTactical.dll")
     Copy-Item -Force `
@@ -102,23 +105,6 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "bootstrap build failed with exit code $LASTEXITCODE"
     }
-
-    $harnessRuntime = Join-Path $dist "UnityHarnessRuntime"
-    $harnessMods = Join-Path $harnessRuntime "NativeMods"
-    New-Item -ItemType Directory -Force -Path $harnessMods | Out-Null
-    Copy-Item -Force $bootstrapDll (Join-Path $harnessRuntime "DofusNativeBootstrap.dll")
-    Copy-Item -Force $bootstrapDll (Join-Path $harnessRuntime "version.dll")
-    Copy-Item -Force `
-        (Join-Path $dist "DofusNativeHost.dll") `
-        (Join-Path $harnessRuntime "DofusNativeHost.dll")
-    Copy-Item -Force `
-        (Join-Path $mods "DofusNativeExample.dll") `
-        (Join-Path $harnessMods "DofusNativeExample.dll")
-    Copy-Item -Force `
-        (Join-Path $mods "DofusNativeTactical.dll") `
-        (Join-Path $harnessMods "DofusNativeTactical.dll")
-    Set-Content -LiteralPath (Join-Path $harnessRuntime ".bootstrap-enabled") `
-        -Value "DofusNativeHarness only" -Encoding ascii
 
     $dofusRuntime = Join-Path $dist "DofusRuntime"
     $dofusMods = Join-Path $dofusRuntime "NativeMods"

@@ -48,6 +48,7 @@ Source: "..\dist\DofusRuntime\NativeMods\DofusNativeTactical.dll"; DestDir: "{ap
 
 [UninstallDelete]
 Type: files; Name: "{app}\NativeMods\native-control.json"
+Type: files; Name: "{app}\NativeMods\native-mods.json"
 Type: files; Name: "{app}\NativeMods\native-bootstrap.log"
 Type: files; Name: "{app}\NativeMods\native-host.log"
 Type: filesandordirs; Name: "{app}\NativeMods\control"
