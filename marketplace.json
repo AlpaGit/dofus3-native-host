@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-07-26T00:00:00Z",
+  "updatedAt": "2026-07-25T23:54:39.7483770+00:00",
   "mods": [
     {
       "id": "bubble.dofus3.native-tactical",
@@ -11,7 +11,7 @@
       "abiVersion": 6,
       "fileName": "DofusNativeTactical.dll",
       "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.2.0/DofusNativeTactical.dll",
-      "sha256": "6774e47cedbc353816cdd270a86f59f07d6dbe4c182e311f1ff9130ad9ee716a",
+      "sha256": "e925eccdf883b1b52b5bc01b881dec9e18d4ffb85dd4451a9b5969f629f61ba6",
       "homepage": "https://github.com/AlpaGit/dofus3-native-host"
     },
     {
@@ -23,7 +23,7 @@
       "abiVersion": 5,
       "fileName": "DofusNetworkDumper.dll",
       "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.2.0/DofusNetworkDumper.dll",
-      "sha256": "fe4864ecf531b35bd0138bb6f9dbd16010fb6cee4161d5dd644ee3725b8371c3",
+      "sha256": "98560da14b222bd45af7c6a95337d841b7237d8e3bcd3fcc0ade353c6ee54837",
       "homepage": "https://github.com/AlpaGit/dofus3-native-host"
     }
   ]
