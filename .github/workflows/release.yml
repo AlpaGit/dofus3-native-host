@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build runtime
+        shell: pwsh
+        run: ./build.ps1 -Configuration Release
+
+      - name: Package runtime
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path dist/DofusRuntime/* `
+            -DestinationPath Dofus3NativeHost-windows-x64.zip
+          (Get-FileHash Dofus3NativeHost-windows-x64.zip -Algorithm SHA256).Hash `
+            + "  Dofus3NativeHost-windows-x64.zip" |
+            Set-Content Dofus3NativeHost-windows-x64.sha256
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          choco install innosetup --yes --no-progress
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' `
+            "/DMyAppVersion=$version" `
+            installer\DofusNativeHost.iss
+          Copy-Item `
+            installer\output\Dofus3NativeHost-Setup-windows-x64.exe `
+            Dofus3NativeHost-Setup-windows-x64.exe
+          (Get-FileHash Dofus3NativeHost-Setup-windows-x64.exe -Algorithm SHA256).Hash `
+            + "  Dofus3NativeHost-Setup-windows-x64.exe" |
+            Set-Content Dofus3NativeHost-Setup-windows-x64.sha256
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            Dofus3NativeHost-windows-x64.zip `
+            Dofus3NativeHost-windows-x64.sha256 `
+            Dofus3NativeHost-Setup-windows-x64.exe `
+            Dofus3NativeHost-Setup-windows-x64.sha256 `
+            --generate-notes `
+            --title "Dofus 3 Native Host $env:GITHUB_REF_NAME"

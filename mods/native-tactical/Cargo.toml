@@ -1,0 +1,12 @@
+[package]
+name = "dofus-native-tactical"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dofus-native-mod-api = { path = "../../crates/mod-api" }
+dofus-native-mod-sdk = { path = "../../crates/mod-sdk" }

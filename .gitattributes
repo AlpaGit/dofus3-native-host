@@ -1,0 +1,4 @@
+* text=auto
+
+# Keep the pinned third-party snapshot byte-for-byte identical to upstream.
+third_party/unityresolve/UnityResolve.hpp -text -diff

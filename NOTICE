@@ -1,0 +1,12 @@
+Dofus Native Host
+Copyright (c) Nexytrus contributors
+Licensed under the MIT License.
+
+This project contains UnityResolve.hpp:
+  Project: https://github.com/issuimo/UnityResolve.hpp
+  Revision: 5c217f19ef9d8c2bc86ecad68acb189e2bfb0f7a
+  Copyright (c) 2023 遂沫
+  License: MIT
+
+The upstream license is included at:
+third_party/unityresolve/LICENSE

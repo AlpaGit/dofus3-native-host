@@ -1,0 +1,1228 @@
+use dofus_native_mod_api::{
+    DNH_ABI_VERSION_1, DNH_ABI_VERSION_2, DNH_ABI_VERSION_3, DNH_ABI_VERSION_4, DNH_OK,
+    DnhClassInfoV2, DnhClassSignatureV3, DnhFieldInfoV2, DnhFieldSignatureV3, DnhGcHandleV4,
+    DnhHostApiV1, DnhHostApiV2, DnhHostApiV3, DnhHostApiV4, DnhLogLevel, DnhMethodInfoV2,
+    DnhMethodSignatureV3, DnhModInfoV1, DnhUnityApiV1, DnhUnityApiV2, DnhUnityApiV3, DnhUnityApiV4,
+    DnmLoadFn, DnmQueryFn, DnmTickFn, DnmUnloadFn, LOAD_EXPORT, QUERY_EXPORT, TICK_EXPORT,
+    UNLOAD_EXPORT,
+};
+use std::ffi::{CStr, OsString, c_char, c_void};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::mem::size_of;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
+use std::ptr::null_mut;
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+type HModule = *mut c_void;
+type Bool = i32;
+type DWord = u32;
+
+const DLL_PROCESS_ATTACH: DWord = 1;
+const GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT: DWord = 0x0000_0002;
+const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: DWord = 0x0000_0004;
+const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: DWord = 0x0000_0100;
+const LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: DWord = 0x0000_1000;
+const MAX_PATH_CHARS: usize = 32_768;
+
+unsafe extern "system" {
+    fn DisableThreadLibraryCalls(module: HModule) -> Bool;
+    fn GetModuleFileNameW(module: HModule, filename: *mut u16, size: DWord) -> DWord;
+    fn GetModuleHandleExW(flags: DWord, module_name: *const u16, module: *mut HModule) -> Bool;
+    fn GetModuleHandleW(module_name: *const u16) -> HModule;
+    fn LoadLibraryExW(filename: *const u16, file: HModule, flags: DWord) -> HModule;
+    fn GetProcAddress(module: HModule, proc_name: *const c_char) -> *mut c_void;
+    fn FreeLibrary(module: HModule) -> Bool;
+    fn OutputDebugStringA(message: *const c_char);
+}
+
+unsafe extern "C" {
+    fn dnh_unity_initialize(game_assembly: HModule) -> bool;
+    fn dnh_unity_is_ready() -> bool;
+    fn dnh_unity_thread_attach() -> HModule;
+    fn dnh_unity_thread_detach(thread: HModule);
+    fn dnh_unity_get_class(
+        assembly: *const c_char,
+        namespace_name: *const c_char,
+        class_name: *const c_char,
+    ) -> HModule;
+    fn dnh_unity_get_field(class_handle: HModule, field_name: *const c_char) -> HModule;
+    fn dnh_unity_get_method(
+        class_handle: HModule,
+        method_name: *const c_char,
+        parameter_count: i32,
+    ) -> HModule;
+    fn dnh_unity_field_offset(field_handle: HModule) -> i32;
+    fn dnh_unity_method_address(method_handle: HModule) -> HModule;
+    fn dnh_unity_find_objects(
+        class_handle: HModule,
+        output: *mut HModule,
+        capacity: usize,
+    ) -> usize;
+    fn dnh_unity_get_classes(
+        assembly: *const c_char,
+        output: *mut HModule,
+        capacity: usize,
+    ) -> usize;
+    fn dnh_unity_get_object_class(object: HModule) -> HModule;
+    fn dnh_unity_class_type_object(class_handle: HModule) -> HModule;
+    fn dnh_unity_copy_class_info(class_handle: HModule, output: *mut DnhClassInfoV2) -> bool;
+    fn dnh_unity_get_class_fields(
+        class_handle: HModule,
+        output: *mut HModule,
+        capacity: usize,
+    ) -> usize;
+    fn dnh_unity_get_class_methods(
+        class_handle: HModule,
+        output: *mut HModule,
+        capacity: usize,
+    ) -> usize;
+    fn dnh_unity_copy_field_info(field_handle: HModule, output: *mut DnhFieldInfoV2) -> bool;
+    fn dnh_unity_copy_method_info(method_handle: HModule, output: *mut DnhMethodInfoV2) -> bool;
+    fn dnh_unity_method_parameter_type_name(method_handle: HModule, index: u32) -> *const c_char;
+    fn dnh_unity_runtime_invoke(
+        method_handle: HModule,
+        object: HModule,
+        arguments: *const HModule,
+        exception: *mut HModule,
+    ) -> HModule;
+    fn dnh_unity_object_unbox(object: HModule) -> HModule;
+    fn dnh_unity_object_new(class_handle: HModule) -> HModule;
+    fn dnh_unity_string_new_utf8(value: *const c_char) -> HModule;
+    fn dnh_unity_array_new(element_class: HModule, length: usize) -> HModule;
+    fn dnh_unity_array_length(array: HModule) -> usize;
+    fn dnh_unity_array_data(array: HModule) -> HModule;
+    fn dnh_unity_class_value_size(class_handle: HModule, alignment: *mut u32) -> i32;
+    fn dnh_unity_class_is_value_type(class_handle: HModule) -> bool;
+    fn dnh_unity_field_get_value(
+        object: HModule,
+        field_handle: HModule,
+        output: *mut c_void,
+    ) -> bool;
+    fn dnh_unity_field_set_value(
+        object: HModule,
+        field_handle: HModule,
+        value: *const c_void,
+    ) -> bool;
+    fn dnh_unity_field_get_value_object(object: HModule, field_handle: HModule) -> HModule;
+    fn dnh_unity_field_get_static_value(field_handle: HModule, output: *mut c_void) -> bool;
+    fn dnh_unity_field_set_static_value(field_handle: HModule, value: *const c_void) -> bool;
+    fn dnh_unity_gc_handle_new(object: HModule, pinned: bool) -> u32;
+    fn dnh_unity_gc_handle_target(handle: u32) -> HModule;
+    fn dnh_unity_gc_handle_free(handle: u32);
+    fn dnh_unity_gc_handle_new_v4(object: HModule, pinned: bool) -> DnhGcHandleV4;
+    fn dnh_unity_gc_handle_target_v4(handle: DnhGcHandleV4) -> HModule;
+    fn dnh_unity_gc_handle_free_v4(handle: DnhGcHandleV4);
+    fn dnh_unity_resolve_icall(name: *const c_char) -> HModule;
+    fn dnh_unity_find_fields_by_signature(
+        class_handle: HModule,
+        signature: *const DnhFieldSignatureV3,
+        output: *mut HModule,
+        capacity: usize,
+    ) -> usize;
+    fn dnh_unity_find_methods_by_signature(
+        class_handle: HModule,
+        signature: *const DnhMethodSignatureV3,
+        output: *mut HModule,
+        capacity: usize,
+    ) -> usize;
+    fn dnh_unity_find_classes_by_signature(
+        assembly: *const c_char,
+        signature: *const DnhClassSignatureV3,
+        output: *mut HModule,
+        capacity: usize,
+    ) -> usize;
+}
+
+static OWN_MODULE: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
+static STATE: OnceLock<Mutex<Option<HostState>>> = OnceLock::new();
+static LOGGER: OnceLock<Mutex<Option<Logger>>> = OnceLock::new();
+static LAST_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
+
+unsafe extern "system" fn unity_is_ready() -> bool {
+    unsafe { dnh_unity_is_ready() }
+}
+
+unsafe extern "system" fn unity_thread_attach() -> HModule {
+    unsafe { dnh_unity_thread_attach() }
+}
+
+unsafe extern "system" fn unity_thread_detach(thread: HModule) {
+    unsafe { dnh_unity_thread_detach(thread) }
+}
+
+unsafe extern "system" fn unity_get_class(
+    assembly: *const c_char,
+    namespace_name: *const c_char,
+    class_name: *const c_char,
+) -> HModule {
+    unsafe { dnh_unity_get_class(assembly, namespace_name, class_name) }
+}
+
+unsafe extern "system" fn unity_get_field(
+    class_handle: HModule,
+    field_name: *const c_char,
+) -> HModule {
+    unsafe { dnh_unity_get_field(class_handle, field_name) }
+}
+
+unsafe extern "system" fn unity_get_method(
+    class_handle: HModule,
+    method_name: *const c_char,
+    parameter_count: i32,
+) -> HModule {
+    unsafe { dnh_unity_get_method(class_handle, method_name, parameter_count) }
+}
+
+unsafe extern "system" fn unity_field_offset(field_handle: HModule) -> i32 {
+    unsafe { dnh_unity_field_offset(field_handle) }
+}
+
+unsafe extern "system" fn unity_method_address(method_handle: HModule) -> HModule {
+    unsafe { dnh_unity_method_address(method_handle) }
+}
+
+unsafe extern "system" fn unity_find_objects(
+    class_handle: HModule,
+    output: *mut HModule,
+    capacity: usize,
+) -> usize {
+    unsafe { dnh_unity_find_objects(class_handle, output, capacity) }
+}
+
+unsafe extern "system" fn unity_get_classes(
+    assembly: *const c_char,
+    output: *mut HModule,
+    capacity: usize,
+) -> usize {
+    unsafe { dnh_unity_get_classes(assembly, output, capacity) }
+}
+
+unsafe extern "system" fn unity_get_object_class(object: HModule) -> HModule {
+    unsafe { dnh_unity_get_object_class(object) }
+}
+
+unsafe extern "system" fn unity_class_type_object(class_handle: HModule) -> HModule {
+    unsafe { dnh_unity_class_type_object(class_handle) }
+}
+
+unsafe extern "system" fn unity_copy_class_info(
+    class_handle: HModule,
+    output: *mut DnhClassInfoV2,
+) -> bool {
+    unsafe { dnh_unity_copy_class_info(class_handle, output) }
+}
+
+unsafe extern "system" fn unity_get_class_fields(
+    class_handle: HModule,
+    output: *mut HModule,
+    capacity: usize,
+) -> usize {
+    unsafe { dnh_unity_get_class_fields(class_handle, output, capacity) }
+}
+
+unsafe extern "system" fn unity_get_class_methods(
+    class_handle: HModule,
+    output: *mut HModule,
+    capacity: usize,
+) -> usize {
+    unsafe { dnh_unity_get_class_methods(class_handle, output, capacity) }
+}
+
+unsafe extern "system" fn unity_copy_field_info(
+    field_handle: HModule,
+    output: *mut DnhFieldInfoV2,
+) -> bool {
+    unsafe { dnh_unity_copy_field_info(field_handle, output) }
+}
+
+unsafe extern "system" fn unity_copy_method_info(
+    method_handle: HModule,
+    output: *mut DnhMethodInfoV2,
+) -> bool {
+    unsafe { dnh_unity_copy_method_info(method_handle, output) }
+}
+
+unsafe extern "system" fn unity_method_parameter_type_name(
+    method_handle: HModule,
+    index: u32,
+) -> *const c_char {
+    unsafe { dnh_unity_method_parameter_type_name(method_handle, index) }
+}
+
+unsafe extern "system" fn unity_runtime_invoke(
+    method_handle: HModule,
+    object: HModule,
+    arguments: *const HModule,
+    exception: *mut HModule,
+) -> HModule {
+    unsafe { dnh_unity_runtime_invoke(method_handle, object, arguments, exception) }
+}
+
+unsafe extern "system" fn unity_object_unbox(object: HModule) -> HModule {
+    unsafe { dnh_unity_object_unbox(object) }
+}
+
+unsafe extern "system" fn unity_object_new(class_handle: HModule) -> HModule {
+    unsafe { dnh_unity_object_new(class_handle) }
+}
+
+unsafe extern "system" fn unity_string_new_utf8(value: *const c_char) -> HModule {
+    unsafe { dnh_unity_string_new_utf8(value) }
+}
+
+unsafe extern "system" fn unity_array_new(element_class: HModule, length: usize) -> HModule {
+    unsafe { dnh_unity_array_new(element_class, length) }
+}
+
+unsafe extern "system" fn unity_array_length(array: HModule) -> usize {
+    unsafe { dnh_unity_array_length(array) }
+}
+
+unsafe extern "system" fn unity_array_data(array: HModule) -> HModule {
+    unsafe { dnh_unity_array_data(array) }
+}
+
+unsafe extern "system" fn unity_class_value_size(
+    class_handle: HModule,
+    alignment: *mut u32,
+) -> i32 {
+    unsafe { dnh_unity_class_value_size(class_handle, alignment) }
+}
+
+unsafe extern "system" fn unity_class_is_value_type(class_handle: HModule) -> bool {
+    unsafe { dnh_unity_class_is_value_type(class_handle) }
+}
+
+unsafe extern "system" fn unity_field_get_value(
+    object: HModule,
+    field_handle: HModule,
+    output: *mut c_void,
+) -> bool {
+    unsafe { dnh_unity_field_get_value(object, field_handle, output) }
+}
+
+unsafe extern "system" fn unity_field_set_value(
+    object: HModule,
+    field_handle: HModule,
+    value: *const c_void,
+) -> bool {
+    unsafe { dnh_unity_field_set_value(object, field_handle, value) }
+}
+
+unsafe extern "system" fn unity_field_get_value_object(
+    object: HModule,
+    field_handle: HModule,
+) -> HModule {
+    unsafe { dnh_unity_field_get_value_object(object, field_handle) }
+}
+
+unsafe extern "system" fn unity_field_get_static_value(
+    field_handle: HModule,
+    output: *mut c_void,
+) -> bool {
+    unsafe { dnh_unity_field_get_static_value(field_handle, output) }
+}
+
+unsafe extern "system" fn unity_field_set_static_value(
+    field_handle: HModule,
+    value: *const c_void,
+) -> bool {
+    unsafe { dnh_unity_field_set_static_value(field_handle, value) }
+}
+
+unsafe extern "system" fn unity_gc_handle_new(object: HModule, pinned: bool) -> u32 {
+    unsafe { dnh_unity_gc_handle_new(object, pinned) }
+}
+
+unsafe extern "system" fn unity_gc_handle_target(handle: u32) -> HModule {
+    unsafe { dnh_unity_gc_handle_target(handle) }
+}
+
+unsafe extern "system" fn unity_gc_handle_free(handle: u32) {
+    unsafe { dnh_unity_gc_handle_free(handle) }
+}
+
+unsafe extern "system" fn unity_gc_handle_new_v4(object: HModule, pinned: bool) -> DnhGcHandleV4 {
+    unsafe { dnh_unity_gc_handle_new_v4(object, pinned) }
+}
+
+unsafe extern "system" fn unity_gc_handle_target_v4(handle: DnhGcHandleV4) -> HModule {
+    unsafe { dnh_unity_gc_handle_target_v4(handle) }
+}
+
+unsafe extern "system" fn unity_gc_handle_free_v4(handle: DnhGcHandleV4) {
+    unsafe { dnh_unity_gc_handle_free_v4(handle) }
+}
+
+unsafe extern "system" fn unity_resolve_icall(name: *const c_char) -> HModule {
+    unsafe { dnh_unity_resolve_icall(name) }
+}
+
+unsafe extern "system" fn unity_find_fields_by_signature(
+    class_handle: HModule,
+    signature: *const DnhFieldSignatureV3,
+    output: *mut HModule,
+    capacity: usize,
+) -> usize {
+    unsafe { dnh_unity_find_fields_by_signature(class_handle, signature, output, capacity) }
+}
+
+unsafe extern "system" fn unity_find_methods_by_signature(
+    class_handle: HModule,
+    signature: *const DnhMethodSignatureV3,
+    output: *mut HModule,
+    capacity: usize,
+) -> usize {
+    unsafe { dnh_unity_find_methods_by_signature(class_handle, signature, output, capacity) }
+}
+
+unsafe extern "system" fn unity_find_classes_by_signature(
+    assembly: *const c_char,
+    signature: *const DnhClassSignatureV3,
+    output: *mut HModule,
+    capacity: usize,
+) -> usize {
+    unsafe { dnh_unity_find_classes_by_signature(assembly, signature, output, capacity) }
+}
+
+struct SyncUnityApiV1(DnhUnityApiV1);
+unsafe impl Sync for SyncUnityApiV1 {}
+
+static UNITY_API_V1: SyncUnityApiV1 = SyncUnityApiV1(DnhUnityApiV1 {
+    abi_version: DNH_ABI_VERSION_1,
+    struct_size: size_of::<DnhUnityApiV1>() as u32,
+    is_ready: unity_is_ready,
+    thread_attach: unity_thread_attach,
+    thread_detach: unity_thread_detach,
+    get_class: unity_get_class,
+    get_field: unity_get_field,
+    get_method: unity_get_method,
+    field_offset: unity_field_offset,
+    method_address: unity_method_address,
+    find_objects: unity_find_objects,
+});
+
+struct SyncUnityApiV2(DnhUnityApiV2);
+unsafe impl Sync for SyncUnityApiV2 {}
+
+const fn make_unity_api_v2(abi_version: u32) -> DnhUnityApiV2 {
+    DnhUnityApiV2 {
+        abi_version,
+        struct_size: size_of::<DnhUnityApiV2>() as u32,
+        is_ready: unity_is_ready,
+        thread_attach: unity_thread_attach,
+        thread_detach: unity_thread_detach,
+        get_class: unity_get_class,
+        get_field: unity_get_field,
+        get_method: unity_get_method,
+        field_offset: unity_field_offset,
+        method_address: unity_method_address,
+        find_objects: unity_find_objects,
+        get_classes: unity_get_classes,
+        get_object_class: unity_get_object_class,
+        class_type_object: unity_class_type_object,
+        copy_class_info: unity_copy_class_info,
+        get_class_fields: unity_get_class_fields,
+        get_class_methods: unity_get_class_methods,
+        copy_field_info: unity_copy_field_info,
+        copy_method_info: unity_copy_method_info,
+        method_parameter_type_name: unity_method_parameter_type_name,
+        runtime_invoke: unity_runtime_invoke,
+        object_unbox: unity_object_unbox,
+        object_new: unity_object_new,
+        string_new_utf8: unity_string_new_utf8,
+        array_new: unity_array_new,
+        array_length: unity_array_length,
+        array_data: unity_array_data,
+        class_value_size: unity_class_value_size,
+        class_is_value_type: unity_class_is_value_type,
+        field_get_value: unity_field_get_value,
+        field_set_value: unity_field_set_value,
+        field_get_value_object: unity_field_get_value_object,
+        field_get_static_value: unity_field_get_static_value,
+        field_set_static_value: unity_field_set_static_value,
+        gc_handle_new: unity_gc_handle_new,
+        gc_handle_target: unity_gc_handle_target,
+        gc_handle_free: unity_gc_handle_free,
+        resolve_icall: unity_resolve_icall,
+    }
+}
+
+static UNITY_API_V2: SyncUnityApiV2 = SyncUnityApiV2(make_unity_api_v2(DNH_ABI_VERSION_2));
+
+struct SyncUnityApiV3(DnhUnityApiV3);
+unsafe impl Sync for SyncUnityApiV3 {}
+
+const fn make_unity_api_v3(abi_version: u32) -> DnhUnityApiV3 {
+    DnhUnityApiV3 {
+        v2: make_unity_api_v2(abi_version),
+        find_fields_by_signature: unity_find_fields_by_signature,
+        find_methods_by_signature: unity_find_methods_by_signature,
+        find_classes_by_signature: unity_find_classes_by_signature,
+    }
+}
+
+static UNITY_API_V3: SyncUnityApiV3 = SyncUnityApiV3(make_unity_api_v3(DNH_ABI_VERSION_3));
+
+struct SyncUnityApiV4(DnhUnityApiV4);
+unsafe impl Sync for SyncUnityApiV4 {}
+
+static UNITY_API_V4: SyncUnityApiV4 = SyncUnityApiV4(DnhUnityApiV4 {
+    v3: make_unity_api_v3(DNH_ABI_VERSION_4),
+    gc_handle_new_v4: unity_gc_handle_new_v4,
+    gc_handle_target_v4: unity_gc_handle_target_v4,
+    gc_handle_free_v4: unity_gc_handle_free_v4,
+});
+
+struct SyncHostApiV1(DnhHostApiV1);
+unsafe impl Sync for SyncHostApiV1 {}
+
+static HOST_API_V1: SyncHostApiV1 = SyncHostApiV1(DnhHostApiV1 {
+    abi_version: DNH_ABI_VERSION_1,
+    struct_size: size_of::<DnhHostApiV1>() as u32,
+    log: host_log_callback,
+    unity: &UNITY_API_V1.0,
+});
+
+struct SyncHostApiV2(DnhHostApiV2);
+unsafe impl Sync for SyncHostApiV2 {}
+
+static HOST_API_V2: SyncHostApiV2 = SyncHostApiV2(DnhHostApiV2 {
+    abi_version: DNH_ABI_VERSION_2,
+    struct_size: size_of::<DnhHostApiV2>() as u32,
+    log: host_log_callback,
+    unity: &UNITY_API_V2.0,
+});
+
+struct SyncHostApiV3(DnhHostApiV3);
+unsafe impl Sync for SyncHostApiV3 {}
+
+static HOST_API_V3: SyncHostApiV3 = SyncHostApiV3(DnhHostApiV3 {
+    abi_version: DNH_ABI_VERSION_3,
+    struct_size: size_of::<DnhHostApiV3>() as u32,
+    log: host_log_callback,
+    unity: &UNITY_API_V3.0,
+});
+
+struct SyncHostApiV4(DnhHostApiV4);
+unsafe impl Sync for SyncHostApiV4 {}
+
+static HOST_API_V4: SyncHostApiV4 = SyncHostApiV4(DnhHostApiV4 {
+    abi_version: DNH_ABI_VERSION_4,
+    struct_size: size_of::<DnhHostApiV4>() as u32,
+    log: host_log_callback,
+    unity: &UNITY_API_V4.0,
+});
+
+struct Logger {
+    file: File,
+}
+
+struct LoadedMod {
+    module: HModule,
+    path: PathBuf,
+    abi_version: u32,
+    id: String,
+    name: String,
+    version: String,
+    tick: DnmTickFn,
+    unload: DnmUnloadFn,
+}
+
+unsafe impl Send for LoadedMod {}
+
+struct HostState {
+    mod_directory: PathBuf,
+    control_directory: PathBuf,
+    control_tick: u64,
+    mods: Vec<LoadedMod>,
+}
+
+unsafe impl Send for HostState {}
+
+fn state() -> &'static Mutex<Option<HostState>> {
+    STATE.get_or_init(|| Mutex::new(None))
+}
+
+fn logger() -> &'static Mutex<Option<Logger>> {
+    LOGGER.get_or_init(|| Mutex::new(None))
+}
+
+fn last_error() -> &'static Mutex<String> {
+    LAST_ERROR.get_or_init(|| Mutex::new(String::new()))
+}
+
+fn wide_null(value: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
+    value.as_ref().encode_wide().chain(Some(0)).collect()
+}
+
+fn module_path(module: HModule) -> Option<PathBuf> {
+    let mut buffer = vec![0_u16; MAX_PATH_CHARS];
+    let length =
+        unsafe { GetModuleFileNameW(module, buffer.as_mut_ptr(), buffer.len() as DWord) } as usize;
+    if length == 0 || length >= buffer.len() {
+        return None;
+    }
+    buffer.truncate(length);
+    Some(PathBuf::from(OsString::from_wide(&buffer)))
+}
+
+fn own_module() -> HModule {
+    let cached = OWN_MODULE.load(Ordering::Acquire);
+    if !cached.is_null() {
+        return cached;
+    }
+
+    let mut module = null_mut();
+    let address = DNH_Initialize as *const () as *const u16;
+    let found = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            address,
+            &mut module,
+        )
+    };
+    if found != 0 {
+        OWN_MODULE.store(module, Ordering::Release);
+        module
+    } else {
+        null_mut()
+    }
+}
+
+fn path_from_wide_ptr(value: *const u16) -> Option<PathBuf> {
+    if value.is_null() {
+        return None;
+    }
+    let mut length = 0_usize;
+    unsafe {
+        while *value.add(length) != 0 {
+            length += 1;
+            if length >= MAX_PATH_CHARS {
+                return None;
+            }
+        }
+        Some(PathBuf::from(OsString::from_wide(
+            std::slice::from_raw_parts(value, length),
+        )))
+    }
+}
+
+fn set_error(message: impl Into<String>) {
+    let message = message.into();
+    if let Ok(mut value) = last_error().lock() {
+        *value = message.clone();
+    }
+    write_log(DnhLogLevel::Error, &message);
+}
+
+fn level_name(level: DnhLogLevel) -> &'static str {
+    match level {
+        DnhLogLevel::Trace => "TRACE",
+        DnhLogLevel::Info => "INFO",
+        DnhLogLevel::Warn => "WARN",
+        DnhLogLevel::Error => "ERROR",
+    }
+}
+
+fn write_log(level: DnhLogLevel, message: &str) {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let line = format!("[{seconds}] [{}] {message}\r\n", level_name(level));
+
+    let mut debug_line = line.as_bytes().to_vec();
+    for byte in &mut debug_line {
+        if *byte == 0 {
+            *byte = b'?';
+        }
+    }
+    debug_line.push(0);
+    unsafe { OutputDebugStringA(debug_line.as_ptr().cast()) };
+
+    if let Ok(mut guard) = logger().lock()
+        && let Some(logger) = guard.as_mut()
+    {
+        let _ = logger.file.write_all(line.as_bytes());
+        let _ = logger.file.flush();
+    }
+}
+
+unsafe extern "system" fn host_log_callback(
+    level: DnhLogLevel,
+    message: *const u8,
+    message_len: usize,
+) {
+    if message.is_null() || message_len == 0 {
+        return;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(message, message_len) };
+    write_log(level, &String::from_utf8_lossy(bytes));
+}
+
+fn c_string(value: *const c_char, label: &str) -> Result<String, String> {
+    if value.is_null() {
+        return Err(format!("descriptor field '{label}' is null"));
+    }
+    let text = unsafe { CStr::from_ptr(value) }
+        .to_str()
+        .map_err(|_| format!("descriptor field '{label}' is not UTF-8"))?;
+    if text.is_empty() {
+        return Err(format!("descriptor field '{label}' is empty"));
+    }
+    Ok(text.to_owned())
+}
+
+unsafe fn export<T: Copy>(module: HModule, name: &[u8]) -> Option<T> {
+    let address = unsafe { GetProcAddress(module, name.as_ptr().cast()) };
+    if address.is_null() {
+        return None;
+    }
+    Some(unsafe { std::mem::transmute_copy::<*mut c_void, T>(&address) })
+}
+
+fn load_one(path: &Path) -> Result<LoadedMod, String> {
+    let wide_path = wide_null(path.as_os_str());
+    let module = unsafe {
+        LoadLibraryExW(
+            wide_path.as_ptr(),
+            null_mut(),
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+        )
+    };
+    if module.is_null() {
+        return Err(format!("LoadLibraryExW failed for {}", path.display()));
+    }
+
+    let result = (|| -> Result<LoadedMod, String> {
+        unsafe {
+            let query = export::<DnmQueryFn>(module, QUERY_EXPORT)
+                .ok_or_else(|| "missing DNM_Query".to_owned())?;
+            let load = export::<DnmLoadFn>(module, LOAD_EXPORT)
+                .ok_or_else(|| "missing DNM_Load".to_owned())?;
+            let tick = export::<DnmTickFn>(module, TICK_EXPORT)
+                .ok_or_else(|| "missing DNM_Tick".to_owned())?;
+            let unload = export::<DnmUnloadFn>(module, UNLOAD_EXPORT)
+                .ok_or_else(|| "missing DNM_Unload".to_owned())?;
+
+            let mut negotiated_abi = 0;
+            let mut info_ptr = std::ptr::null();
+            for abi_version in [
+                DNH_ABI_VERSION_4,
+                DNH_ABI_VERSION_3,
+                DNH_ABI_VERSION_2,
+                DNH_ABI_VERSION_1,
+            ] {
+                let candidate = catch_unwind(AssertUnwindSafe(|| query(abi_version)))
+                    .map_err(|_| format!("DNM_Query panicked for ABI v{abi_version}"))?;
+                if !candidate.is_null() {
+                    negotiated_abi = abi_version;
+                    info_ptr = candidate;
+                    break;
+                }
+            }
+
+            let info = info_ptr
+                .as_ref()
+                .ok_or_else(|| "DNM_Query rejected ABI v4, v3, v2 and v1".to_owned())?;
+            if info.abi_version != negotiated_abi
+                || info.struct_size < size_of::<DnhModInfoV1>() as u32
+            {
+                return Err("invalid DnhModInfoV1 descriptor".to_owned());
+            }
+
+            let id = c_string(info.id, "id")?;
+            let name = c_string(info.name, "name")?;
+            let version = c_string(info.version, "version")?;
+            let _author = c_string(info.author, "author")?;
+
+            let host_api = match negotiated_abi {
+                DNH_ABI_VERSION_4 => (&HOST_API_V4.0 as *const DnhHostApiV4).cast::<DnhHostApiV1>(),
+                DNH_ABI_VERSION_3 => (&HOST_API_V3.0 as *const DnhHostApiV3).cast::<DnhHostApiV1>(),
+                DNH_ABI_VERSION_2 => (&HOST_API_V2.0 as *const DnhHostApiV2).cast::<DnhHostApiV1>(),
+                _ => &HOST_API_V1.0,
+            };
+            let load_result = catch_unwind(AssertUnwindSafe(|| load(host_api)))
+                .map_err(|_| "DNM_Load panicked".to_owned())?;
+            if load_result != DNH_OK {
+                return Err(format!("DNM_Load returned {load_result}"));
+            }
+
+            write_log(
+                DnhLogLevel::Info,
+                &format!("{name} negotiated native ABI v{negotiated_abi}"),
+            );
+
+            Ok(LoadedMod {
+                module,
+                path: path.to_path_buf(),
+                abi_version: negotiated_abi,
+                id,
+                name,
+                version,
+                tick,
+                unload,
+            })
+        }
+    })();
+
+    if result.is_err() {
+        unsafe {
+            FreeLibrary(module);
+        }
+    }
+    result
+}
+
+fn discover_mods(directory: &Path, own_path: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths = std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let is_dll = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"));
+            if !is_dll || own_path.is_some_and(|own| own == path) {
+                return None;
+            }
+            Some(path)
+        })
+        .collect::<Vec<_>>();
+    paths.sort_by_key(|path| path.file_name().map(|name| name.to_ascii_lowercase()));
+    paths
+}
+
+fn json_string(value: &str) -> String {
+    let mut output = String::with_capacity(value.len() + 2);
+    output.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            character if character.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(output, "\\u{:04x}", character as u32);
+            }
+            character => output.push(character),
+        }
+    }
+    output.push('"');
+    output
+}
+
+fn control_status(state: &HostState) -> String {
+    let mods = state
+        .mods
+        .iter()
+        .map(|loaded_mod| {
+            format!(
+                "{{\"id\":{},\"name\":{},\"version\":{},\"abiVersion\":{},\"path\":{}}}",
+                json_string(&loaded_mod.id),
+                json_string(&loaded_mod.name),
+                json_string(&loaded_mod.version),
+                loaded_mod.abi_version,
+                json_string(&loaded_mod.path.display().to_string()),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"running\":true,\"pid\":{},\"abiVersion\":{},\"controlDirectory\":{},\"mods\":[{}]}}",
+        std::process::id(),
+        DNH_ABI_VERSION_4,
+        json_string(&state.control_directory.display().to_string()),
+        mods,
+    )
+}
+
+fn unload_mod_at(state: &mut HostState, index: usize) {
+    let loaded_mod = state.mods.remove(index);
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe { (loaded_mod.unload)() }));
+    unsafe {
+        FreeLibrary(loaded_mod.module);
+    }
+    write_log(
+        DnhLogLevel::Info,
+        &format!("control unloaded {}", loaded_mod.id),
+    );
+}
+
+fn controlled_load(state: &mut HostState, requested_path: &str) -> Result<String, String> {
+    let path = PathBuf::from(requested_path);
+    if !path.is_absolute()
+        || !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"))
+    {
+        return Err("LOAD requires an absolute .dll path".to_owned());
+    }
+    let canonical = std::fs::canonicalize(&path)
+        .map_err(|error| format!("cannot resolve {}: {error}", path.display()))?;
+    let loaded_mod = load_one(&canonical)?;
+    if state
+        .mods
+        .iter()
+        .any(|existing| existing.id == loaded_mod.id)
+    {
+        unsafe {
+            (loaded_mod.unload)();
+            FreeLibrary(loaded_mod.module);
+        }
+        return Err(format!("mod id '{}' is already loaded", loaded_mod.id));
+    }
+    let result = format!(
+        "{{\"id\":{},\"name\":{},\"version\":{},\"abiVersion\":{}}}",
+        json_string(&loaded_mod.id),
+        json_string(&loaded_mod.name),
+        json_string(&loaded_mod.version),
+        loaded_mod.abi_version,
+    );
+    write_log(
+        DnhLogLevel::Info,
+        &format!(
+            "control loaded {} {} ({})",
+            loaded_mod.name, loaded_mod.version, loaded_mod.id
+        ),
+    );
+    state.mods.push(loaded_mod);
+    Ok(result)
+}
+
+fn execute_control_command(state: &mut HostState, request: &str) -> Result<String, String> {
+    let parts = request
+        .trim_end_matches(['\r', '\n'])
+        .split('\t')
+        .collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["STATUS"] | ["LIST"] => Ok(control_status(state)),
+        ["LOAD", path] => controlled_load(state, path),
+        ["UNLOAD", id] => {
+            let index = state
+                .mods
+                .iter()
+                .position(|loaded_mod| loaded_mod.id == *id)
+                .ok_or_else(|| format!("mod id '{id}' is not loaded"))?;
+            unload_mod_at(state, index);
+            Ok(format!("{{\"unloaded\":{}}}", json_string(id)))
+        }
+        ["RELOAD", id, path] => {
+            let index = state
+                .mods
+                .iter()
+                .position(|loaded_mod| loaded_mod.id == *id)
+                .ok_or_else(|| format!("mod id '{id}' is not loaded"))?;
+            unload_mod_at(state, index);
+            controlled_load(state, path)
+        }
+        _ => Err("expected STATUS, LIST, LOAD, UNLOAD or RELOAD".to_owned()),
+    }
+}
+
+fn write_control_response(path: &Path, response: &str) -> std::io::Result<()> {
+    let temporary = path.with_extension("response.tmp");
+    std::fs::write(&temporary, response.as_bytes())?;
+    std::fs::rename(temporary, path)
+}
+
+fn process_control_requests(state: &mut HostState) {
+    state.control_tick = state.control_tick.wrapping_add(1);
+    if !state.control_tick.is_multiple_of(15) {
+        return;
+    }
+    let inbox = state.control_directory.join("inbox");
+    let outbox = state.control_directory.join("outbox");
+    let mut requests = std::fs::read_dir(&inbox)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().and_then(|value| value.to_str()) == Some("request")).then_some(path)
+        })
+        .collect::<Vec<_>>();
+    requests.sort();
+    requests.truncate(8);
+
+    for path in requests {
+        let Some(request_id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if request_id.is_empty()
+            || !request_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            continue;
+        }
+        let request = match std::fs::read_to_string(&path) {
+            Ok(request) if request.len() <= 32_768 => request,
+            Ok(_) => {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            Err(_) => continue,
+        };
+        let response = match execute_control_command(state, &request) {
+            Ok(result) => format!("OK\t{result}"),
+            Err(error) => format!("ERROR\t{}", error.replace(['\r', '\n', '\t'], " ")),
+        };
+        let response_path = outbox.join(format!("{request_id}.response"));
+        if let Err(error) = write_control_response(&response_path, &response) {
+            write_log(
+                DnhLogLevel::Error,
+                &format!("cannot write native control response: {error}"),
+            );
+            continue;
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    let descriptor = state.mod_directory.join("native-control.json");
+    let _ = std::fs::write(descriptor, control_status(state));
+}
+
+#[unsafe(no_mangle)]
+/// Initializes UnityResolve and loads all valid mods from the selected folder.
+///
+/// # Safety
+///
+/// `game_assembly`, when non-null, must be the loaded `GameAssembly.dll`
+/// module handle. `mod_directory`, when non-null, must be a readable,
+/// null-terminated UTF-16 string.
+pub unsafe extern "system" fn DNH_Initialize(
+    game_assembly: HModule,
+    mod_directory: *const u16,
+) -> i32 {
+    let mut state_guard = match state().lock() {
+        Ok(guard) => guard,
+        Err(_) => return -2,
+    };
+    if state_guard.is_some() {
+        return 1;
+    }
+
+    let own_module = own_module();
+    let own_path = module_path(own_module);
+    let directory = path_from_wide_ptr(mod_directory).unwrap_or_else(|| {
+        own_path
+            .as_deref()
+            .and_then(Path::parent)
+            .unwrap_or_else(|| Path::new("."))
+            .join("NativeMods")
+    });
+    if let Err(error) = std::fs::create_dir_all(&directory) {
+        set_error(format!(
+            "cannot create mod directory {}: {error}",
+            directory.display()
+        ));
+        return -3;
+    }
+
+    let log_path = directory.join("native-host.log");
+    match OpenOptions::new().create(true).append(true).open(&log_path) {
+        Ok(file) => {
+            if let Ok(mut guard) = logger().lock() {
+                *guard = Some(Logger { file });
+            }
+        }
+        Err(error) => {
+            set_error(format!("cannot open {}: {error}", log_path.display()));
+            return -4;
+        }
+    }
+
+    write_log(
+        DnhLogLevel::Info,
+        &format!("Dofus Native Host ABI v{DNH_ABI_VERSION_4} starting"),
+    );
+    write_log(
+        DnhLogLevel::Info,
+        &format!("mod directory: {}", directory.display()),
+    );
+
+    let resolved_game_assembly = if game_assembly.is_null() {
+        let name = wide_null("GameAssembly.dll");
+        unsafe { GetModuleHandleW(name.as_ptr()) }
+    } else {
+        game_assembly
+    };
+    if resolved_game_assembly.is_null() {
+        set_error("GameAssembly.dll is not loaded");
+        return -5;
+    }
+    if !unsafe { dnh_unity_initialize(resolved_game_assembly) } {
+        set_error("UnityResolve initialization failed; call after IL2CPP startup");
+        return -6;
+    }
+
+    let control_directory = directory
+        .join("control")
+        .join(std::process::id().to_string());
+    if let Err(error) = std::fs::create_dir_all(control_directory.join("inbox"))
+        .and_then(|_| std::fs::create_dir_all(control_directory.join("outbox")))
+    {
+        set_error(format!(
+            "cannot create native control directory {}: {error}",
+            control_directory.display()
+        ));
+        return -7;
+    }
+
+    let mut loaded = Vec::new();
+    for path in discover_mods(&directory, own_path.as_deref()) {
+        match load_one(&path) {
+            Ok(module) => {
+                if loaded
+                    .iter()
+                    .any(|existing: &LoadedMod| existing.id == module.id)
+                {
+                    write_log(
+                        DnhLogLevel::Warn,
+                        &format!(
+                            "duplicate mod id '{}' in {}; skipped",
+                            module.id,
+                            path.display()
+                        ),
+                    );
+                    unsafe {
+                        (module.unload)();
+                        FreeLibrary(module.module);
+                    }
+                    continue;
+                }
+                write_log(
+                    DnhLogLevel::Info,
+                    &format!("loaded {} {} ({})", module.name, module.version, module.id),
+                );
+                loaded.push(module);
+            }
+            Err(error) => write_log(
+                DnhLogLevel::Warn,
+                &format!("skipped {}: {error}", path.display()),
+            ),
+        }
+    }
+
+    write_log(
+        DnhLogLevel::Info,
+        &format!("startup complete: {} mod(s) loaded", loaded.len()),
+    );
+    *state_guard = Some(HostState {
+        mod_directory: directory,
+        control_directory,
+        control_tick: 0,
+        mods: loaded,
+    });
+    if let Some(state) = state_guard.as_ref() {
+        let descriptor = state.mod_directory.join("native-control.json");
+        let _ = std::fs::write(descriptor, control_status(state));
+    }
+    DNH_OK
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn DNH_Tick() {
+    let Ok(mut guard) = state().lock() else {
+        return;
+    };
+    let Some(state) = guard.as_mut() else {
+        return;
+    };
+    process_control_requests(state);
+    for loaded_mod in &state.mods {
+        if catch_unwind(AssertUnwindSafe(|| unsafe { (loaded_mod.tick)() })).is_err() {
+            write_log(
+                DnhLogLevel::Error,
+                &format!("mod '{}' panicked in DNM_Tick", loaded_mod.id),
+            );
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn DNH_Shutdown() {
+    let Ok(mut guard) = state().lock() else {
+        return;
+    };
+    let Some(mut current) = guard.take() else {
+        return;
+    };
+
+    for loaded_mod in current.mods.drain(..).rev() {
+        let _ = catch_unwind(AssertUnwindSafe(|| unsafe { (loaded_mod.unload)() }));
+        unsafe {
+            FreeLibrary(loaded_mod.module);
+        }
+        write_log(DnhLogLevel::Info, &format!("unloaded {}", loaded_mod.id));
+    }
+    write_log(
+        DnhLogLevel::Info,
+        &format!(
+            "Dofus Native Host stopped ({})",
+            current.mod_directory.display()
+        ),
+    );
+    let _ = std::fs::remove_file(current.mod_directory.join("native-control.json"));
+    if let Ok(mut guard) = logger().lock() {
+        *guard = None;
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn DNH_GetLoadedModCount() -> usize {
+    state()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|state| state.mods.len()))
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+/// Copies the latest initialization error as UTF-8.
+///
+/// # Safety
+///
+/// When non-null, `output` must be writable for `capacity` bytes.
+pub unsafe extern "system" fn DNH_CopyLastError(output: *mut u8, capacity: usize) -> usize {
+    let Ok(error) = last_error().lock() else {
+        return 0;
+    };
+    let bytes = error.as_bytes();
+    if !output.is_null() && capacity != 0 {
+        let count = bytes.len().min(capacity.saturating_sub(1));
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), output, count);
+            *output.add(count) = 0;
+        }
+    }
+    bytes.len()
+}
+
+#[unsafe(no_mangle)]
+/// Windows loader entry point. It deliberately performs no runtime startup.
+///
+/// # Safety
+///
+/// This function is called by the Windows loader with loader-owned handles.
+pub unsafe extern "system" fn DllMain(module: HModule, reason: DWord, _reserved: HModule) -> Bool {
+    if reason == DLL_PROCESS_ATTACH {
+        OWN_MODULE.store(module, Ordering::Release);
+        unsafe {
+            DisableThreadLibraryCalls(module);
+        }
+    }
+    1
+}

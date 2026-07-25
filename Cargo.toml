@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "crates/mod-api",
+    "crates/mod-sdk",
+    "crates/host",
+    "mods/example",
+    "mods/native-tactical",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Nexytrus contributors"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+strip = "symbols"

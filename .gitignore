@@ -1,0 +1,11 @@
+/target/
+/dist/
+/NativeMods/
+*.log
+/unity-harness/Library/
+/unity-harness/Logs/
+/unity-harness/Temp/
+/unity-harness/obj/
+/unity-harness/UserSettings/
+/unity-harness/Build/
+/installer/output/
