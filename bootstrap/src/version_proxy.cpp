@@ -16,9 +16,6 @@ namespace {
 
 constexpr wchar_t kDofusProcessName[] = L"Dofus.exe";
 constexpr wchar_t kDofusDataName[] = L"Dofus_Data";
-constexpr wchar_t kHarnessProcessName[] = L"DofusNativeHarness.exe";
-constexpr wchar_t kHarnessDataName[] = L"DofusNativeHarness_Data";
-constexpr wchar_t kHarnessSentinelName[] = L".bootstrap-enabled";
 constexpr wchar_t kHostName[] = L"DofusNativeHost.dll";
 constexpr wchar_t kGameAssemblyName[] = L"GameAssembly.dll";
 constexpr wchar_t kModDirectoryName[] = L"NativeMods";
@@ -126,14 +123,6 @@ bool IsDofusRuntime(const std::filesystem::path& directory) {
            std::filesystem::is_directory(directory / kDofusDataName);
 }
 
-bool IsHarnessRuntime(const std::filesystem::path& directory) {
-    const std::filesystem::path process_path = ModulePath(nullptr);
-    return !process_path.empty() &&
-           _wcsicmp(process_path.filename().c_str(), kHarnessProcessName) == 0 &&
-           std::filesystem::is_directory(directory / kHarnessDataName) &&
-           std::filesystem::is_regular_file(directory / kHarnessSentinelName);
-}
-
 BOOL CALLBACK LoadSystemVersion(PINIT_ONCE, PVOID, PVOID*) {
     std::array<wchar_t, 32768> system_directory{};
     const UINT length =
@@ -213,8 +202,7 @@ LONG InitializeHostOnUnityThread() {
         g_state.store(-2);
         return -2;
     }
-    if (!IsDofusRuntime(bootstrap_directory) &&
-        !IsHarnessRuntime(bootstrap_directory)) {
+    if (!IsDofusRuntime(bootstrap_directory)) {
         SetBootstrapError("bootstrap refused an unsupported process or data directory");
         g_state.store(-2);
         return -2;

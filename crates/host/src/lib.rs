@@ -1,11 +1,20 @@
+mod manager_ui;
+mod marketplace;
+
 use dofus_native_mod_api::{
-    DNH_ABI_VERSION_1, DNH_ABI_VERSION_2, DNH_ABI_VERSION_3, DNH_ABI_VERSION_4, DNH_OK,
-    DnhClassInfoV2, DnhClassSignatureV3, DnhFieldInfoV2, DnhFieldSignatureV3, DnhGcHandleV4,
-    DnhHostApiV1, DnhHostApiV2, DnhHostApiV3, DnhHostApiV4, DnhLogLevel, DnhMethodInfoV2,
-    DnhMethodSignatureV3, DnhModInfoV1, DnhUnityApiV1, DnhUnityApiV2, DnhUnityApiV3, DnhUnityApiV4,
+    DNH_ABI_VERSION_1, DNH_ABI_VERSION_2, DNH_ABI_VERSION_3, DNH_ABI_VERSION_4, DNH_ABI_VERSION_5,
+    DNH_ABI_VERSION_6, DNH_ERROR, DNH_OK, DnhClassInfoV2, DnhClassSignatureV3, DnhFieldInfoV2,
+    DnhFieldSignatureV3, DnhGcHandleV4, DnhHookApiV5, DnhHostApiV1, DnhHostApiV2, DnhHostApiV3,
+    DnhHostApiV4, DnhHostApiV5, DnhHostApiV6, DnhLogLevel, DnhMethodInfoV2, DnhMethodSignatureV3,
+    DnhModInfoV1, DnhUnityApiV1, DnhUnityApiV2, DnhUnityApiV3, DnhUnityApiV4, DnhUnityApiV6,
     DnmLoadFn, DnmQueryFn, DnmTickFn, DnmUnloadFn, LOAD_EXPORT, QUERY_EXPORT, TICK_EXPORT,
     UNLOAD_EXPORT,
 };
+use manager_ui::{InstalledModView, UiAction, UiController, UiSnapshot};
+use marketplace::{MarketplaceMod, WorkerResult};
+use minhook::MinHook;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, OsString, c_char, c_void};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -15,8 +24,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Mutex, OnceLock};
+use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 
 type HModule = *mut c_void;
 type Bool = i32;
@@ -28,6 +40,7 @@ const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: DWord = 0x0000_0004;
 const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: DWord = 0x0000_0100;
 const LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: DWord = 0x0000_1000;
 const MAX_PATH_CHARS: usize = 32_768;
+const VK_F1: i32 = 0x70;
 
 unsafe extern "system" {
     fn DisableThreadLibraryCalls(module: HModule) -> Bool;
@@ -118,6 +131,11 @@ unsafe extern "C" {
     fn dnh_unity_gc_handle_target_v4(handle: DnhGcHandleV4) -> HModule;
     fn dnh_unity_gc_handle_free_v4(handle: DnhGcHandleV4);
     fn dnh_unity_resolve_icall(name: *const c_char) -> HModule;
+    fn dnh_unity_inflate_generic_method(
+        method_handle: HModule,
+        type_arguments: *const HModule,
+        type_argument_count: usize,
+    ) -> HModule;
     fn dnh_unity_find_fields_by_signature(
         class_handle: HModule,
         signature: *const DnhFieldSignatureV3,
@@ -142,6 +160,7 @@ static OWN_MODULE: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 static STATE: OnceLock<Mutex<Option<HostState>>> = OnceLock::new();
 static LOGGER: OnceLock<Mutex<Option<Logger>>> = OnceLock::new();
 static LAST_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
+static HOOKS: OnceLock<Mutex<BTreeMap<usize, usize>>> = OnceLock::new();
 
 unsafe extern "system" fn unity_is_ready() -> bool {
     unsafe { dnh_unity_is_ready() }
@@ -363,6 +382,14 @@ unsafe extern "system" fn unity_resolve_icall(name: *const c_char) -> HModule {
     unsafe { dnh_unity_resolve_icall(name) }
 }
 
+unsafe extern "system" fn unity_inflate_generic_method(
+    method_handle: HModule,
+    type_arguments: *const HModule,
+    type_argument_count: usize,
+) -> HModule {
+    unsafe { dnh_unity_inflate_generic_method(method_handle, type_arguments, type_argument_count) }
+}
+
 unsafe extern "system" fn unity_find_fields_by_signature(
     class_handle: HModule,
     signature: *const DnhFieldSignatureV3,
@@ -472,11 +499,131 @@ static UNITY_API_V3: SyncUnityApiV3 = SyncUnityApiV3(make_unity_api_v3(DNH_ABI_V
 struct SyncUnityApiV4(DnhUnityApiV4);
 unsafe impl Sync for SyncUnityApiV4 {}
 
-static UNITY_API_V4: SyncUnityApiV4 = SyncUnityApiV4(DnhUnityApiV4 {
-    v3: make_unity_api_v3(DNH_ABI_VERSION_4),
-    gc_handle_new_v4: unity_gc_handle_new_v4,
-    gc_handle_target_v4: unity_gc_handle_target_v4,
-    gc_handle_free_v4: unity_gc_handle_free_v4,
+const fn make_unity_api_v4(abi_version: u32) -> DnhUnityApiV4 {
+    DnhUnityApiV4 {
+        v3: make_unity_api_v3(abi_version),
+        gc_handle_new_v4: unity_gc_handle_new_v4,
+        gc_handle_target_v4: unity_gc_handle_target_v4,
+        gc_handle_free_v4: unity_gc_handle_free_v4,
+    }
+}
+
+static UNITY_API_V4: SyncUnityApiV4 = SyncUnityApiV4(make_unity_api_v4(DNH_ABI_VERSION_4));
+static UNITY_API_V5: SyncUnityApiV4 = SyncUnityApiV4(make_unity_api_v4(DNH_ABI_VERSION_5));
+
+struct SyncUnityApiV6(DnhUnityApiV6);
+unsafe impl Sync for SyncUnityApiV6 {}
+
+static UNITY_API_V6: SyncUnityApiV6 = SyncUnityApiV6(DnhUnityApiV6 {
+    v4: make_unity_api_v4(DNH_ABI_VERSION_6),
+    inflate_generic_method: unity_inflate_generic_method,
+});
+
+fn hooks() -> &'static Mutex<BTreeMap<usize, usize>> {
+    HOOKS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+unsafe extern "system" fn hook_create(
+    target: HModule,
+    detour: HModule,
+    original: *mut HModule,
+) -> i32 {
+    if target.is_null() || detour.is_null() || original.is_null() {
+        return DNH_ERROR;
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        MinHook::create_hook(target, detour)
+    }));
+    let Ok(Ok(trampoline)) = result else {
+        write_log(DnhLogLevel::Error, "MinHook create failed");
+        return DNH_ERROR;
+    };
+    unsafe {
+        *original = trampoline;
+    }
+    if let Ok(mut registry) = hooks().lock() {
+        registry.insert(target as usize, detour as usize);
+    }
+    DNH_OK
+}
+
+unsafe extern "system" fn hook_enable(target: HModule) -> i32 {
+    if target.is_null() {
+        return DNH_ERROR;
+    }
+    match catch_unwind(AssertUnwindSafe(|| unsafe { MinHook::enable_hook(target) })) {
+        Ok(Ok(())) => DNH_OK,
+        _ => DNH_ERROR,
+    }
+}
+
+unsafe extern "system" fn hook_disable(target: HModule) -> i32 {
+    if target.is_null() {
+        return DNH_ERROR;
+    }
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
+        MinHook::disable_hook(target)
+    })) {
+        Ok(Ok(())) => DNH_OK,
+        _ => DNH_ERROR,
+    }
+}
+
+unsafe extern "system" fn hook_remove(target: HModule) -> i32 {
+    if target.is_null() {
+        return DNH_ERROR;
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let _ = MinHook::disable_hook(target);
+        MinHook::remove_hook(target)
+    }));
+    if let Ok(mut registry) = hooks().lock() {
+        registry.remove(&(target as usize));
+    }
+    match result {
+        Ok(Ok(())) => DNH_OK,
+        _ => DNH_ERROR,
+    }
+}
+
+fn remove_hooks_for_module(module: HModule) {
+    let targets = hooks()
+        .lock()
+        .ok()
+        .map(|registry| {
+            registry
+                .iter()
+                .filter_map(|(target, detour)| {
+                    let mut detour_module = null_mut();
+                    let found = unsafe {
+                        GetModuleHandleExW(
+                            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                                | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            *detour as *const u16,
+                            &mut detour_module,
+                        )
+                    };
+                    (found != 0 && detour_module == module).then_some(*target)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for target in targets {
+        unsafe {
+            hook_remove(target as HModule);
+        }
+    }
+}
+
+struct SyncHookApiV5(DnhHookApiV5);
+unsafe impl Sync for SyncHookApiV5 {}
+
+static HOOK_API_V5: SyncHookApiV5 = SyncHookApiV5(DnhHookApiV5 {
+    struct_size: size_of::<DnhHookApiV5>() as u32,
+    create: hook_create,
+    enable: hook_enable,
+    disable: hook_disable,
+    remove: hook_remove,
 });
 
 struct SyncHostApiV1(DnhHostApiV1);
@@ -519,6 +666,30 @@ static HOST_API_V4: SyncHostApiV4 = SyncHostApiV4(DnhHostApiV4 {
     unity: &UNITY_API_V4.0,
 });
 
+struct SyncHostApiV5(DnhHostApiV5);
+unsafe impl Sync for SyncHostApiV5 {}
+
+static HOST_API_V5: SyncHostApiV5 = SyncHostApiV5(DnhHostApiV5 {
+    v4: DnhHostApiV4 {
+        abi_version: DNH_ABI_VERSION_5,
+        struct_size: size_of::<DnhHostApiV5>() as u32,
+        log: host_log_callback,
+        unity: &UNITY_API_V5.0,
+    },
+    hooks: &HOOK_API_V5.0,
+});
+
+struct SyncHostApiV6(DnhHostApiV6);
+unsafe impl Sync for SyncHostApiV6 {}
+
+static HOST_API_V6: SyncHostApiV6 = SyncHostApiV6(DnhHostApiV6 {
+    abi_version: DNH_ABI_VERSION_6,
+    struct_size: size_of::<DnhHostApiV6>() as u32,
+    log: host_log_callback,
+    unity: &UNITY_API_V6.0,
+    hooks: &HOOK_API_V5.0,
+});
+
 struct Logger {
     file: File,
 }
@@ -530,6 +701,7 @@ struct LoadedMod {
     id: String,
     name: String,
     version: String,
+    author: String,
     tick: DnmTickFn,
     unload: DnmUnloadFn,
 }
@@ -540,7 +712,13 @@ struct HostState {
     mod_directory: PathBuf,
     control_directory: PathBuf,
     control_tick: u64,
+    f1_down: bool,
+    disabled: BTreeSet<String>,
     mods: Vec<LoadedMod>,
+    ui: Option<UiController>,
+    worker_sender: Sender<WorkerResult>,
+    worker_receiver: Receiver<WorkerResult>,
+    workers: Vec<JoinHandle<()>>,
 }
 
 unsafe impl Send for HostState {}
@@ -687,6 +865,55 @@ unsafe fn export<T: Copy>(module: HModule, name: &[u8]) -> Option<T> {
     Some(unsafe { std::mem::transmute_copy::<*mut c_void, T>(&address) })
 }
 
+struct ModMetadata {
+    abi_version: u32,
+    id: String,
+    name: String,
+    version: String,
+    author: String,
+}
+
+fn query_mod(module: HModule) -> Result<ModMetadata, String> {
+    unsafe {
+        let query = export::<DnmQueryFn>(module, QUERY_EXPORT)
+            .ok_or_else(|| "missing DNM_Query".to_owned())?;
+        let mut negotiated_abi = 0;
+        let mut info_ptr = std::ptr::null();
+        for abi_version in [
+            DNH_ABI_VERSION_6,
+            DNH_ABI_VERSION_5,
+            DNH_ABI_VERSION_4,
+            DNH_ABI_VERSION_3,
+            DNH_ABI_VERSION_2,
+            DNH_ABI_VERSION_1,
+        ] {
+            let candidate = catch_unwind(AssertUnwindSafe(|| query(abi_version)))
+                .map_err(|_| format!("DNM_Query panicked for ABI v{abi_version}"))?;
+            if !candidate.is_null() {
+                negotiated_abi = abi_version;
+                info_ptr = candidate;
+                break;
+            }
+        }
+
+        let info = info_ptr
+            .as_ref()
+            .ok_or_else(|| "DNM_Query rejected ABI v6, v5, v4, v3, v2 and v1".to_owned())?;
+        if info.abi_version != negotiated_abi || info.struct_size < size_of::<DnhModInfoV1>() as u32
+        {
+            return Err("invalid DnhModInfoV1 descriptor".to_owned());
+        }
+
+        Ok(ModMetadata {
+            abi_version: negotiated_abi,
+            id: c_string(info.id, "id")?,
+            name: c_string(info.name, "name")?,
+            version: c_string(info.version, "version")?,
+            author: c_string(info.author, "author")?,
+        })
+    }
+}
+
 fn load_one(path: &Path) -> Result<LoadedMod, String> {
     let wide_path = wide_null(path.as_os_str());
     let module = unsafe {
@@ -702,8 +929,6 @@ fn load_one(path: &Path) -> Result<LoadedMod, String> {
 
     let result = (|| -> Result<LoadedMod, String> {
         unsafe {
-            let query = export::<DnmQueryFn>(module, QUERY_EXPORT)
-                .ok_or_else(|| "missing DNM_Query".to_owned())?;
             let load = export::<DnmLoadFn>(module, LOAD_EXPORT)
                 .ok_or_else(|| "missing DNM_Load".to_owned())?;
             let tick = export::<DnmTickFn>(module, TICK_EXPORT)
@@ -711,38 +936,11 @@ fn load_one(path: &Path) -> Result<LoadedMod, String> {
             let unload = export::<DnmUnloadFn>(module, UNLOAD_EXPORT)
                 .ok_or_else(|| "missing DNM_Unload".to_owned())?;
 
-            let mut negotiated_abi = 0;
-            let mut info_ptr = std::ptr::null();
-            for abi_version in [
-                DNH_ABI_VERSION_4,
-                DNH_ABI_VERSION_3,
-                DNH_ABI_VERSION_2,
-                DNH_ABI_VERSION_1,
-            ] {
-                let candidate = catch_unwind(AssertUnwindSafe(|| query(abi_version)))
-                    .map_err(|_| format!("DNM_Query panicked for ABI v{abi_version}"))?;
-                if !candidate.is_null() {
-                    negotiated_abi = abi_version;
-                    info_ptr = candidate;
-                    break;
-                }
-            }
+            let metadata = query_mod(module)?;
 
-            let info = info_ptr
-                .as_ref()
-                .ok_or_else(|| "DNM_Query rejected ABI v4, v3, v2 and v1".to_owned())?;
-            if info.abi_version != negotiated_abi
-                || info.struct_size < size_of::<DnhModInfoV1>() as u32
-            {
-                return Err("invalid DnhModInfoV1 descriptor".to_owned());
-            }
-
-            let id = c_string(info.id, "id")?;
-            let name = c_string(info.name, "name")?;
-            let version = c_string(info.version, "version")?;
-            let _author = c_string(info.author, "author")?;
-
-            let host_api = match negotiated_abi {
+            let host_api = match metadata.abi_version {
+                DNH_ABI_VERSION_6 => (&HOST_API_V6.0 as *const DnhHostApiV6).cast::<DnhHostApiV1>(),
+                DNH_ABI_VERSION_5 => (&HOST_API_V5.0 as *const DnhHostApiV5).cast::<DnhHostApiV1>(),
                 DNH_ABI_VERSION_4 => (&HOST_API_V4.0 as *const DnhHostApiV4).cast::<DnhHostApiV1>(),
                 DNH_ABI_VERSION_3 => (&HOST_API_V3.0 as *const DnhHostApiV3).cast::<DnhHostApiV1>(),
                 DNH_ABI_VERSION_2 => (&HOST_API_V2.0 as *const DnhHostApiV2).cast::<DnhHostApiV1>(),
@@ -756,16 +954,20 @@ fn load_one(path: &Path) -> Result<LoadedMod, String> {
 
             write_log(
                 DnhLogLevel::Info,
-                &format!("{name} negotiated native ABI v{negotiated_abi}"),
+                &format!(
+                    "{} negotiated native ABI v{}",
+                    metadata.name, metadata.abi_version
+                ),
             );
 
             Ok(LoadedMod {
                 module,
                 path: path.to_path_buf(),
-                abi_version: negotiated_abi,
-                id,
-                name,
-                version,
+                abi_version: metadata.abi_version,
+                id: metadata.id,
+                name: metadata.name,
+                version: metadata.version,
+                author: metadata.author,
                 tick,
                 unload,
             })
@@ -773,6 +975,7 @@ fn load_one(path: &Path) -> Result<LoadedMod, String> {
     })();
 
     if result.is_err() {
+        remove_hooks_for_module(module);
         unsafe {
             FreeLibrary(module);
         }
@@ -799,6 +1002,116 @@ fn discover_mods(directory: &Path, own_path: Option<&Path>) -> Vec<PathBuf> {
         .collect::<Vec<_>>();
     paths.sort_by_key(|path| path.file_name().map(|name| name.to_ascii_lowercase()));
     paths
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModSettings {
+    disabled: BTreeSet<String>,
+}
+
+fn mod_file_key(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+}
+
+fn settings_path(directory: &Path) -> PathBuf {
+    directory.join("native-mods.json")
+}
+
+fn load_settings(directory: &Path) -> BTreeSet<String> {
+    let path = settings_path(directory);
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return BTreeSet::new();
+    };
+    match serde_json::from_str::<ModSettings>(&contents) {
+        Ok(mut settings) => {
+            settings.disabled = settings
+                .disabled
+                .into_iter()
+                .map(|name| name.to_ascii_lowercase())
+                .collect();
+            settings.disabled
+        }
+        Err(error) => {
+            write_log(
+                DnhLogLevel::Warn,
+                &format!("ignored invalid {}: {error}", path.display()),
+            );
+            BTreeSet::new()
+        }
+    }
+}
+
+fn save_settings(state: &HostState) -> Result<(), String> {
+    let settings = ModSettings {
+        disabled: state.disabled.clone(),
+    };
+    let json = serde_json::to_vec_pretty(&settings)
+        .map_err(|error| format!("sérialisation des réglages impossible : {error}"))?;
+    let path = settings_path(&state.mod_directory);
+    std::fs::write(&path, json)
+        .map_err(|error| format!("écriture de {} impossible : {error}", path.display()))
+}
+
+fn inspect_one(path: &Path) -> Result<ModMetadata, String> {
+    let wide_path = wide_null(path.as_os_str());
+    let module = unsafe {
+        LoadLibraryExW(
+            wide_path.as_ptr(),
+            null_mut(),
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+        )
+    };
+    if module.is_null() {
+        return Err(format!("LoadLibraryExW failed for {}", path.display()));
+    }
+    let result = query_mod(module);
+    unsafe {
+        FreeLibrary(module);
+    }
+    result
+}
+
+fn ui_snapshot(state: &HostState) -> UiSnapshot {
+    let mut installed = Vec::new();
+    for path in discover_mods(&state.mod_directory, None) {
+        if let Some(loaded) = state.mods.iter().find(|loaded| {
+            std::fs::canonicalize(&loaded.path)
+                .ok()
+                .zip(std::fs::canonicalize(&path).ok())
+                .is_some_and(|(left, right)| left == right)
+        }) {
+            installed.push(InstalledModView {
+                id: loaded.id.clone(),
+                name: loaded.name.clone(),
+                version: loaded.version.clone(),
+                abi_version: loaded.abi_version,
+                path: path.display().to_string(),
+                loaded: true,
+                disabled: false,
+            });
+            continue;
+        }
+        match inspect_one(&path) {
+            Ok(metadata) => installed.push(InstalledModView {
+                id: metadata.id,
+                name: metadata.name,
+                version: metadata.version,
+                abi_version: metadata.abi_version,
+                path: path.display().to_string(),
+                loaded: false,
+                disabled: mod_file_key(&path).is_some_and(|key| state.disabled.contains(&key)),
+            }),
+            Err(error) => write_log(
+                DnhLogLevel::Warn,
+                &format!("cannot inspect {} for mod manager: {error}", path.display()),
+            ),
+        }
+    }
+    installed.sort_by_key(|entry| entry.name.to_ascii_lowercase());
+    UiSnapshot { installed }
 }
 
 fn json_string(value: &str) -> String {
@@ -828,10 +1141,11 @@ fn control_status(state: &HostState) -> String {
         .iter()
         .map(|loaded_mod| {
             format!(
-                "{{\"id\":{},\"name\":{},\"version\":{},\"abiVersion\":{},\"path\":{}}}",
+                "{{\"id\":{},\"name\":{},\"version\":{},\"author\":{},\"abiVersion\":{},\"path\":{}}}",
                 json_string(&loaded_mod.id),
                 json_string(&loaded_mod.name),
                 json_string(&loaded_mod.version),
+                json_string(&loaded_mod.author),
                 loaded_mod.abi_version,
                 json_string(&loaded_mod.path.display().to_string()),
             )
@@ -841,7 +1155,7 @@ fn control_status(state: &HostState) -> String {
     format!(
         "{{\"running\":true,\"pid\":{},\"abiVersion\":{},\"controlDirectory\":{},\"mods\":[{}]}}",
         std::process::id(),
-        DNH_ABI_VERSION_4,
+        DNH_ABI_VERSION_6,
         json_string(&state.control_directory.display().to_string()),
         mods,
     )
@@ -850,6 +1164,7 @@ fn control_status(state: &HostState) -> String {
 fn unload_mod_at(state: &mut HostState, index: usize) {
     let loaded_mod = state.mods.remove(index);
     let _ = catch_unwind(AssertUnwindSafe(|| unsafe { (loaded_mod.unload)() }));
+    remove_hooks_for_module(loaded_mod.module);
     unsafe {
         FreeLibrary(loaded_mod.module);
     }
@@ -879,6 +1194,7 @@ fn controlled_load(state: &mut HostState, requested_path: &str) -> Result<String
     {
         unsafe {
             (loaded_mod.unload)();
+            remove_hooks_for_module(loaded_mod.module);
             FreeLibrary(loaded_mod.module);
         }
         return Err(format!("mod id '{}' is already loaded", loaded_mod.id));
@@ -899,6 +1215,279 @@ fn controlled_load(state: &mut HostState, requested_path: &str) -> Result<String
     );
     state.mods.push(loaded_mod);
     Ok(result)
+}
+
+fn managed_mod_path(state: &HostState, requested_path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(requested_path);
+    let canonical = std::fs::canonicalize(&path)
+        .map_err(|error| format!("résolution de {} impossible : {error}", path.display()))?;
+    let directory = std::fs::canonicalize(&state.mod_directory).map_err(|error| {
+        format!(
+            "résolution de {} impossible : {error}",
+            state.mod_directory.display()
+        )
+    })?;
+    if canonical.parent() != Some(directory.as_path())
+        || !canonical
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"))
+    {
+        return Err("le mod sélectionné n'appartient pas au dossier NativeMods".to_owned());
+    }
+    Ok(canonical)
+}
+
+fn enable_mod(state: &mut HostState, view: &InstalledModView) -> Result<String, String> {
+    if state.mods.iter().any(|loaded| loaded.id == view.id) {
+        return Ok(format!("{} est déjà actif.", view.name));
+    }
+    let path = managed_mod_path(state, &view.path)?;
+    let key = mod_file_key(&path).ok_or_else(|| "nom de DLL invalide".to_owned())?;
+    let was_disabled = state.disabled.remove(&key);
+    match load_one(&path) {
+        Ok(loaded) => {
+            if state.mods.iter().any(|existing| existing.id == loaded.id) {
+                unsafe {
+                    (loaded.unload)();
+                    remove_hooks_for_module(loaded.module);
+                    FreeLibrary(loaded.module);
+                }
+                if was_disabled {
+                    state.disabled.insert(key);
+                }
+                return Err(format!("le mod '{}' est déjà chargé", view.id));
+            }
+            let name = loaded.name.clone();
+            state.mods.push(loaded);
+            save_settings(state)?;
+            Ok(format!("{name} est maintenant actif."))
+        }
+        Err(error) => {
+            if was_disabled {
+                state.disabled.insert(key);
+            }
+            Err(error)
+        }
+    }
+}
+
+fn disable_mod(state: &mut HostState, view: &InstalledModView) -> Result<String, String> {
+    let path = managed_mod_path(state, &view.path)?;
+    if let Some(index) = state.mods.iter().position(|loaded| loaded.id == view.id) {
+        unload_mod_at(state, index);
+    }
+    let key = mod_file_key(&path).ok_or_else(|| "nom de DLL invalide".to_owned())?;
+    state.disabled.insert(key);
+    save_settings(state)?;
+    Ok(format!(
+        "{} est désactivé, y compris pour les prochains lancements.",
+        view.name
+    ))
+}
+
+fn reload_mod(state: &mut HostState, view: &InstalledModView) -> Result<String, String> {
+    let path = managed_mod_path(state, &view.path)?;
+    if let Some(index) = state.mods.iter().position(|loaded| loaded.id == view.id) {
+        unload_mod_at(state, index);
+    }
+    let loaded = load_one(&path)?;
+    let name = loaded.name.clone();
+    state.mods.push(loaded);
+    if let Some(key) = mod_file_key(&path) {
+        state.disabled.remove(&key);
+    }
+    save_settings(state)?;
+    Ok(format!("{name} a été rechargé."))
+}
+
+fn apply_prepared_install(
+    state: &mut HostState,
+    entry: &MarketplaceMod,
+    temporary_path: &Path,
+) -> Result<String, String> {
+    marketplace::validate_entry(entry)?;
+    let target = state.mod_directory.join(&entry.file_name);
+    let backup = state
+        .mod_directory
+        .join(format!(".{}.backup", entry.file_name));
+    if backup.exists() {
+        let _ = std::fs::remove_file(temporary_path);
+        return Err(format!(
+            "une sauvegarde existe déjà : {}. Supprimez-la après vérification.",
+            backup.display()
+        ));
+    }
+
+    let loaded_index = state
+        .mods
+        .iter()
+        .position(|loaded| loaded.id == entry.id || loaded.path == target);
+    let was_loaded = loaded_index.is_some();
+    if let Some(index) = loaded_index {
+        unload_mod_at(state, index);
+    }
+
+    let had_target = target.exists();
+    if had_target && let Err(error) = std::fs::rename(&target, &backup) {
+        let _ = std::fs::remove_file(temporary_path);
+        return Err(format!("sauvegarde de l'ancienne DLL impossible : {error}"));
+    }
+    if let Err(error) = std::fs::rename(temporary_path, &target) {
+        if had_target {
+            let _ = std::fs::rename(&backup, &target);
+        }
+        return Err(format!(
+            "installation de la nouvelle DLL impossible : {error}"
+        ));
+    }
+
+    let load_result = load_one(&target).and_then(|loaded| {
+        if loaded.id != entry.id {
+            unsafe {
+                (loaded.unload)();
+                remove_hooks_for_module(loaded.module);
+                FreeLibrary(loaded.module);
+            }
+            return Err(format!(
+                "la DLL téléchargée déclare '{}' au lieu de '{}'",
+                loaded.id, entry.id
+            ));
+        }
+        Ok(loaded)
+    });
+    match load_result {
+        Ok(loaded) => {
+            let installed_name = loaded.name.clone();
+            let installed_version = loaded.version.clone();
+            state.mods.push(loaded);
+            if let Some(key) = mod_file_key(&target) {
+                state.disabled.remove(&key);
+            }
+            save_settings(state)?;
+            if had_target {
+                let _ = std::fs::remove_file(&backup);
+            }
+            Ok(format!(
+                "{installed_name} {installed_version} est installé et actif."
+            ))
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&target);
+            if had_target {
+                let _ = std::fs::rename(&backup, &target);
+                if was_loaded {
+                    match load_one(&target) {
+                        Ok(previous) => state.mods.push(previous),
+                        Err(rollback_error) => write_log(
+                            DnhLogLevel::Error,
+                            &format!(
+                                "rollback load failed for {}: {rollback_error}",
+                                target.display()
+                            ),
+                        ),
+                    }
+                }
+            }
+            Err(format!(
+                "installation annulée et ancienne DLL restaurée : {error}"
+            ))
+        }
+    }
+}
+
+fn process_manager(state: &mut HostState) {
+    let mut worker_index = 0;
+    while worker_index < state.workers.len() {
+        if state.workers[worker_index].is_finished() {
+            let worker = state.workers.remove(worker_index);
+            let _ = worker.join();
+        } else {
+            worker_index += 1;
+        }
+    }
+
+    let f1_down = unsafe { GetAsyncKeyState(VK_F1) } < 0;
+    if f1_down && !state.f1_down {
+        let snapshot = ui_snapshot(state);
+        if let Some(ui) = state.ui.as_ref() {
+            ui.toggle(snapshot);
+        }
+    }
+    state.f1_down = f1_down;
+
+    for _ in 0..8 {
+        let action = state.ui.as_ref().and_then(|ui| ui.try_action().ok());
+        let Some(action) = action else {
+            break;
+        };
+        let result = match action {
+            UiAction::Enable(view) => enable_mod(state, &view),
+            UiAction::Disable(view) => disable_mod(state, &view),
+            UiAction::Reload(view) => reload_mod(state, &view),
+            UiAction::RefreshMarketplace => {
+                if let Some(ui) = state.ui.as_ref() {
+                    ui.set_status("Actualisation de la marketplace GitHub…");
+                }
+                state
+                    .workers
+                    .push(marketplace::refresh_async(state.worker_sender.clone()));
+                continue;
+            }
+            UiAction::Install(entry) => {
+                if let Some(ui) = state.ui.as_ref() {
+                    ui.set_status(format!(
+                        "Téléchargement et vérification SHA-256 de {}…",
+                        entry.name
+                    ));
+                }
+                state.workers.push(marketplace::download_mod_async(
+                    entry,
+                    state.mod_directory.clone(),
+                    state.worker_sender.clone(),
+                ));
+                continue;
+            }
+        };
+        if let Some(ui) = state.ui.as_ref() {
+            match result {
+                Ok(message) => ui.set_status(message),
+                Err(error) => ui.set_status(format!("Erreur : {error}")),
+            }
+            ui.update_snapshot(ui_snapshot(state));
+        }
+    }
+
+    for _ in 0..8 {
+        let Ok(result) = state.worker_receiver.try_recv() else {
+            break;
+        };
+        match result {
+            WorkerResult::Catalog(result) => {
+                if let Some(ui) = state.ui.as_ref() {
+                    ui.update_catalog(result);
+                }
+            }
+            WorkerResult::Downloaded {
+                entry,
+                temporary_path,
+            } => {
+                let result = apply_prepared_install(state, &entry, &temporary_path);
+                if let Some(ui) = state.ui.as_ref() {
+                    match result {
+                        Ok(message) => ui.set_status(message),
+                        Err(error) => ui.set_status(format!("Erreur : {error}")),
+                    }
+                    ui.update_snapshot(ui_snapshot(state));
+                }
+            }
+            WorkerResult::DownloadFailed { id, error } => {
+                if let Some(ui) = state.ui.as_ref() {
+                    ui.set_status(format!("Échec du téléchargement de {id} : {error}"));
+                }
+            }
+        }
+    }
 }
 
 fn execute_control_command(state: &mut HostState, request: &str) -> Result<String, String> {
@@ -1046,7 +1635,7 @@ pub unsafe extern "system" fn DNH_Initialize(
 
     write_log(
         DnhLogLevel::Info,
-        &format!("Dofus Native Host ABI v{DNH_ABI_VERSION_4} starting"),
+        &format!("Dofus Native Host ABI v{DNH_ABI_VERSION_6} starting"),
     );
     write_log(
         DnhLogLevel::Info,
@@ -1081,8 +1670,16 @@ pub unsafe extern "system" fn DNH_Initialize(
         return -7;
     }
 
+    let disabled = load_settings(&directory);
     let mut loaded = Vec::new();
     for path in discover_mods(&directory, own_path.as_deref()) {
+        if mod_file_key(&path).is_some_and(|key| disabled.contains(&key)) {
+            write_log(
+                DnhLogLevel::Info,
+                &format!("disabled by native-mods.json: {}", path.display()),
+            );
+            continue;
+        }
         match load_one(&path) {
             Ok(module) => {
                 if loaded
@@ -1099,6 +1696,7 @@ pub unsafe extern "system" fn DNH_Initialize(
                     );
                     unsafe {
                         (module.unload)();
+                        remove_hooks_for_module(module.module);
                         FreeLibrary(module.module);
                     }
                     continue;
@@ -1120,11 +1718,34 @@ pub unsafe extern "system" fn DNH_Initialize(
         DnhLogLevel::Info,
         &format!("startup complete: {} mod(s) loaded", loaded.len()),
     );
+    let ui = match UiController::start() {
+        Ok(ui) => {
+            write_log(
+                DnhLogLevel::Info,
+                "native mod manager ready; press F1 to open",
+            );
+            Some(ui)
+        }
+        Err(error) => {
+            write_log(
+                DnhLogLevel::Error,
+                &format!("native mod manager unavailable: {error}"),
+            );
+            None
+        }
+    };
+    let (worker_sender, worker_receiver) = channel();
     *state_guard = Some(HostState {
         mod_directory: directory,
         control_directory,
         control_tick: 0,
+        f1_down: false,
+        disabled,
         mods: loaded,
+        ui,
+        worker_sender,
+        worker_receiver,
+        workers: Vec::new(),
     });
     if let Some(state) = state_guard.as_ref() {
         let descriptor = state.mod_directory.join("native-control.json");
@@ -1141,6 +1762,7 @@ pub extern "system" fn DNH_Tick() {
     let Some(state) = guard.as_mut() else {
         return;
     };
+    process_manager(state);
     process_control_requests(state);
     for loaded_mod in &state.mods {
         if catch_unwind(AssertUnwindSafe(|| unsafe { (loaded_mod.tick)() })).is_err() {
@@ -1161,8 +1783,15 @@ pub extern "system" fn DNH_Shutdown() {
         return;
     };
 
+    if let Some(ui) = current.ui.take() {
+        ui.shutdown();
+    }
+    for worker in current.workers.drain(..) {
+        let _ = worker.join();
+    }
     for loaded_mod in current.mods.drain(..).rev() {
         let _ = catch_unwind(AssertUnwindSafe(|| unsafe { (loaded_mod.unload)() }));
+        remove_hooks_for_module(loaded_mod.module);
         unsafe {
             FreeLibrary(loaded_mod.module);
         }

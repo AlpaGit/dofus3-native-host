@@ -6,7 +6,9 @@ pub const DNH_ABI_VERSION_1: u32 = 1;
 pub const DNH_ABI_VERSION_2: u32 = 2;
 pub const DNH_ABI_VERSION_3: u32 = 3;
 pub const DNH_ABI_VERSION_4: u32 = 4;
-pub const DNH_ABI_VERSION: u32 = DNH_ABI_VERSION_4;
+pub const DNH_ABI_VERSION_5: u32 = 5;
+pub const DNH_ABI_VERSION_6: u32 = 6;
+pub const DNH_ABI_VERSION: u32 = DNH_ABI_VERSION_6;
 pub const DNH_OK: i32 = 0;
 pub const DNH_ERROR: i32 = -1;
 
@@ -197,6 +199,7 @@ pub const DNH_MEMBER_STORAGE_INSTANCE: u8 = 1;
 pub const DNH_MEMBER_STORAGE_STATIC: u8 = 2;
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct DnhFieldSignatureV3 {
     pub struct_size: u32,
     pub name: *const c_char,
@@ -208,6 +211,7 @@ pub struct DnhFieldSignatureV3 {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct DnhMethodSignatureV3 {
     pub struct_size: u32,
     pub name: *const c_char,
@@ -220,6 +224,7 @@ pub struct DnhMethodSignatureV3 {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct DnhClassSignatureV3 {
     pub struct_size: u32,
     pub name: *const c_char,
@@ -273,6 +278,18 @@ pub struct DnhUnityApiV4 {
     pub gc_handle_free_v4: DnhUnityGcHandleFreeV4Fn,
 }
 
+pub type DnhUnityInflateGenericMethodFn = unsafe extern "system" fn(
+    method_handle: DnhHandle,
+    type_arguments: *const DnhHandle,
+    type_argument_count: usize,
+) -> DnhHandle;
+
+#[repr(C)]
+pub struct DnhUnityApiV6 {
+    pub v4: DnhUnityApiV4,
+    pub inflate_generic_method: DnhUnityInflateGenericMethodFn,
+}
+
 #[repr(C)]
 pub struct DnhHostApiV1 {
     pub abi_version: u32,
@@ -305,6 +322,37 @@ pub struct DnhHostApiV4 {
     pub unity: *const DnhUnityApiV4,
 }
 
+pub type DnhHookCreateFn = unsafe extern "system" fn(
+    target: DnhHandle,
+    detour: DnhHandle,
+    original: *mut DnhHandle,
+) -> i32;
+pub type DnhHookTargetFn = unsafe extern "system" fn(target: DnhHandle) -> i32;
+
+#[repr(C)]
+pub struct DnhHookApiV5 {
+    pub struct_size: u32,
+    pub create: DnhHookCreateFn,
+    pub enable: DnhHookTargetFn,
+    pub disable: DnhHookTargetFn,
+    pub remove: DnhHookTargetFn,
+}
+
+#[repr(C)]
+pub struct DnhHostApiV5 {
+    pub v4: DnhHostApiV4,
+    pub hooks: *const DnhHookApiV5,
+}
+
+#[repr(C)]
+pub struct DnhHostApiV6 {
+    pub abi_version: u32,
+    pub struct_size: u32,
+    pub log: DnhLogFn,
+    pub unity: *const DnhUnityApiV6,
+    pub hooks: *const DnhHookApiV5,
+}
+
 #[repr(C)]
 pub struct DnhModInfoV1 {
     pub abi_version: u32,
@@ -324,3 +372,19 @@ pub const QUERY_EXPORT: &[u8] = b"DNM_Query\0";
 pub const LOAD_EXPORT: &[u8] = b"DNM_Load\0";
 pub const TICK_EXPORT: &[u8] = b"DNM_Tick\0";
 pub const UNLOAD_EXPORT: &[u8] = b"DNM_Unload\0";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::mem::{offset_of, size_of};
+
+    #[test]
+    fn abi_v6_keeps_the_v5_host_prefix() {
+        assert_eq!(size_of::<DnhHostApiV6>(), size_of::<DnhHostApiV5>());
+        assert_eq!(
+            offset_of!(DnhHostApiV6, hooks),
+            offset_of!(DnhHostApiV5, hooks)
+        );
+        assert!(size_of::<DnhUnityApiV6>() > size_of::<DnhUnityApiV4>());
+    }
+}

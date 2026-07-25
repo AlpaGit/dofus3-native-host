@@ -79,6 +79,10 @@ std::uintptr_t dnh_unity_gc_handle_new_v4(void* object, bool pinned);
 void* dnh_unity_gc_handle_target_v4(std::uintptr_t handle);
 void dnh_unity_gc_handle_free_v4(std::uintptr_t handle);
 void* dnh_unity_resolve_icall(const char* name);
+void* dnh_unity_inflate_generic_method(
+    void* method_handle,
+    void* const* type_arguments,
+    std::size_t type_argument_count);
 std::size_t dnh_unity_find_fields_by_signature(
     void* class_handle,
     const DnhFieldSignatureV3* signature,
