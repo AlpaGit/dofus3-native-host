@@ -9,7 +9,8 @@ pub const DNH_ABI_VERSION_4: u32 = 4;
 pub const DNH_ABI_VERSION_5: u32 = 5;
 pub const DNH_ABI_VERSION_6: u32 = 6;
 pub const DNH_ABI_VERSION_7: u32 = 7;
-pub const DNH_ABI_VERSION: u32 = DNH_ABI_VERSION_7;
+pub const DNH_ABI_VERSION_8: u32 = 8;
+pub const DNH_ABI_VERSION: u32 = DNH_ABI_VERSION_8;
 pub const DNH_OK: i32 = 0;
 pub const DNH_ERROR: i32 = -1;
 
@@ -310,6 +311,14 @@ pub struct DnhUnityApiV7 {
     pub runtime_invoke_virtual: DnhUnityRuntimeInvokeVirtualFn,
 }
 
+pub type DnhUnityClassParentFn = unsafe extern "system" fn(class_handle: DnhHandle) -> DnhHandle;
+
+#[repr(C)]
+pub struct DnhUnityApiV8 {
+    pub v7: DnhUnityApiV7,
+    pub class_parent: DnhUnityClassParentFn,
+}
+
 #[repr(C)]
 pub struct DnhHostApiV1 {
     pub abi_version: u32,
@@ -383,6 +392,15 @@ pub struct DnhHostApiV7 {
 }
 
 #[repr(C)]
+pub struct DnhHostApiV8 {
+    pub abi_version: u32,
+    pub struct_size: u32,
+    pub log: DnhLogFn,
+    pub unity: *const DnhUnityApiV8,
+    pub hooks: *const DnhHookApiV5,
+}
+
+#[repr(C)]
 pub struct DnhModInfoV1 {
     pub abi_version: u32,
     pub struct_size: u32,
@@ -411,6 +429,7 @@ mod tests {
     fn newer_abis_keep_the_v5_host_prefix() {
         assert_eq!(size_of::<DnhHostApiV6>(), size_of::<DnhHostApiV5>());
         assert_eq!(size_of::<DnhHostApiV7>(), size_of::<DnhHostApiV6>());
+        assert_eq!(size_of::<DnhHostApiV8>(), size_of::<DnhHostApiV7>());
         assert_eq!(
             offset_of!(DnhHostApiV6, hooks),
             offset_of!(DnhHostApiV5, hooks)
@@ -419,7 +438,12 @@ mod tests {
             offset_of!(DnhHostApiV7, hooks),
             offset_of!(DnhHostApiV6, hooks)
         );
+        assert_eq!(
+            offset_of!(DnhHostApiV8, hooks),
+            offset_of!(DnhHostApiV7, hooks)
+        );
         assert!(size_of::<DnhUnityApiV6>() > size_of::<DnhUnityApiV4>());
         assert!(size_of::<DnhUnityApiV7>() > size_of::<DnhUnityApiV6>());
+        assert!(size_of::<DnhUnityApiV8>() > size_of::<DnhUnityApiV7>());
     }
 }

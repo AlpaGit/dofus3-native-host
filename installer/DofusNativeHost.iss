@@ -45,6 +45,7 @@ Source: "..\dist\DofusRuntime\DofusNativeBootstrap.dll"; DestDir: "{app}"; Flags
 Source: "..\dist\DofusRuntime\DofusNativeHost.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\DofusRuntime\NativeMods\DofusNativeExample.dll"; DestDir: "{app}\NativeMods"; Flags: ignoreversion
 Source: "..\dist\DofusRuntime\NativeMods\DofusNativeTactical.dll"; DestDir: "{app}\NativeMods"; Flags: ignoreversion
+Source: "..\dist\DofusRuntime\NativeMods\DofusCombatAnimationSkipper.dll"; DestDir: "{app}\NativeMods"; Flags: ignoreversion
 
 [UninstallDelete]
 Type: files; Name: "{app}\NativeMods\native-control.json"

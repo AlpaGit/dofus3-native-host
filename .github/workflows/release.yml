@@ -49,6 +49,12 @@ jobs:
           (Get-FileHash DofusInterfaceAnalyzer.dll -Algorithm SHA256).Hash.ToLowerInvariant() `
             + "  DofusInterfaceAnalyzer.dll" |
             Set-Content DofusInterfaceAnalyzer.sha256
+          Copy-Item `
+            dist/NativeMods/DofusCombatAnimationSkipper.dll `
+            DofusCombatAnimationSkipper.dll
+          (Get-FileHash DofusCombatAnimationSkipper.dll -Algorithm SHA256).Hash.ToLowerInvariant() `
+            + "  DofusCombatAnimationSkipper.dll" |
+            Set-Content DofusCombatAnimationSkipper.sha256
           Compress-Archive `
             -Path dist/DofusRuntime/* `
             -DestinationPath Dofus3NativeHost-windows-x64.zip
@@ -89,6 +95,8 @@ jobs:
             DofusRuntimeInspector.sha256 `
             DofusInterfaceAnalyzer.dll `
             DofusInterfaceAnalyzer.sha256 `
+            DofusCombatAnimationSkipper.dll `
+            DofusCombatAnimationSkipper.sha256 `
             --generate-notes `
             --title "Dofus 3 Native Host $env:GITHUB_REF_NAME"
 
@@ -115,6 +123,10 @@ jobs:
             Where-Object id -eq 'bubble.dofus3.interface-analyzer'
           $interface.downloadUrl = "https://github.com/AlpaGit/dofus3-native-host/releases/download/$tag/DofusInterfaceAnalyzer.dll"
           $interface.sha256 = (Get-FileHash DofusInterfaceAnalyzer.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          $animation = $catalog.mods |
+            Where-Object id -eq 'bubble.dofus3.combat-animation-skipper'
+          $animation.downloadUrl = "https://github.com/AlpaGit/dofus3-native-host/releases/download/$tag/DofusCombatAnimationSkipper.dll"
+          $animation.sha256 = (Get-FileHash DofusCombatAnimationSkipper.dll -Algorithm SHA256).Hash.ToLowerInvariant()
           $catalog.updatedAt = [DateTimeOffset]::UtcNow.ToString('O')
           $catalog | ConvertTo-Json -Depth 10 |
             Set-Content marketplace.json -Encoding utf8

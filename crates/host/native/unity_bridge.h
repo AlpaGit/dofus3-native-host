@@ -95,6 +95,7 @@ void* dnh_unity_runtime_invoke_virtual(
     void* object,
     void* const* arguments,
     void** exception);
+void* dnh_unity_class_parent(void* class_handle);
 std::size_t dnh_unity_find_fields_by_signature(
     void* class_handle,
     const DnhFieldSignatureV3* signature,

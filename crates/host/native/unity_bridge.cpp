@@ -338,6 +338,10 @@ bool ClassMatches(
 }
 }
 
+extern "C" void* dnh_unity_class_parent(void* class_handle) {
+    return ParentOf(static_cast<UnityResolve::Class*>(class_handle));
+}
+
 extern "C" bool dnh_unity_initialize(void* game_assembly) {
     if (g_ready.load(std::memory_order_acquire)) {
         return true;

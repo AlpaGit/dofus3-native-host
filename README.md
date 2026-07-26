@@ -12,6 +12,7 @@ Le projet fournit :
 - une marketplace pilotée par un simple `marketplace.json` hébergé sur GitHub ;
 - un canal de contrôle permettant de charger, décharger et recharger une DLL ;
 - le mod **Dofus 3 Native Tactical**, activable avec `F8`.
+- le mod **Dofus Combat Animation Skipper**, actif uniquement en combat.
 
 > [!IMPORTANT]
 > Ce projet n’est ni développé, ni approuvé, ni distribué par Ankama. Une mise
@@ -57,6 +58,19 @@ présent sur disque, mais le host ne le charge plus aux lancements suivants.
 > [!WARNING]
 > Un dump réseau peut contenir des messages privés ou des données de compte.
 > Ne publiez jamais le dossier `DofusNetworkDump` sans l’avoir relu et nettoyé.
+
+### Dofus Combat Animation Skipper
+
+- Inclus dans l’installateur et le ZIP ; désactivable depuis `F1`.
+- Détecte automatiquement l’entrée et la sortie d’un combat.
+- Termine immédiatement les animations `Animator2D` non bouclées, tout en
+  conservant la dernière frame, `reachedEndOfAnimation` et l’événement
+  `AnimationEnded`.
+- Laisse les animations bouclées et toutes les animations hors combat à leur
+  vitesse normale.
+- Résout `Run`, `StartAnimation` et le service de combat par leurs signatures
+  et leur hiérarchie, sans nom de méthode obfusqué codé en dur.
+- Code : [mods/combat-animation-skipper](https://github.com/AlpaGit/dofus3-native-host/tree/main/mods/combat-animation-skipper).
 
 ### Dofus Runtime Inspector
 
@@ -136,6 +150,7 @@ Dofus-dofus3/
   NativeMods/
     DofusNativeExample.dll
     DofusNativeTactical.dll
+    DofusCombatAnimationSkipper.dll
 ```
 
 ### 4. Lancer
@@ -177,6 +192,7 @@ DofusNativeBootstrap.dll
 DofusNativeHost.dll
 NativeMods/DofusNativeExample.dll
 NativeMods/DofusNativeTactical.dll
+NativeMods/DofusCombatAnimationSkipper.dll
 NativeMods/native-control.json
 NativeMods/native-mods.json
 ```
@@ -197,8 +213,9 @@ NativeMods/native-host.log
 Un démarrage sain contient notamment :
 
 ```text
-Dofus Native Host ABI v7 starting
+Dofus Native Host ABI v8 starting
 Dofus 3 Native Tactical negotiated native ABI v6
+Dofus Combat Animation Skipper negotiated native ABI v8
 native mod manager ready; press F1 to open
 Ready. Press F8 to toggle native tactical mode (Rust SDK, native sprites, ABI v6).
 ```
@@ -233,10 +250,11 @@ Pour publier ou mettre à jour un mod :
 
 Le schéma courant est `schemaVersion: 1`. Le workflow de release joint
 automatiquement `DofusNativeTactical.dll`, `DofusNetworkDumper.dll`,
-`DofusRuntimeInspector.dll`, `DofusInterfaceAnalyzer.dll` et leurs fichiers
-`.sha256` aux nouveaux tags.
+`DofusRuntimeInspector.dll`, `DofusInterfaceAnalyzer.dll`,
+`DofusCombatAnimationSkipper.dll` et leurs fichiers `.sha256` aux nouveaux
+tags.
 
-## Pourquoi une ABI v7 ?
+## Pourquoi une ABI v8 ?
 
 Dofus 3 utilise Unity 6 et IL2CPP. Les noms du code du jeu peuvent être
 obfusqués et changer entre deux builds. L’ABI évite donc de dépendre uniquement
@@ -257,8 +275,10 @@ IL2CPP génériques : un mod peut par exemple résoudre
 `LoadAssetAsync<GameObject>` sans MelonLoader ni nom obfusqué. L’ABI v7 ajoute
 le test d’assignabilité des classes, une conversion UTF-8 sûre des chaînes
 IL2CPP et l’invocation virtuelle explicite, indispensables à l’analyse
-générique de l’UI Toolkit. Les anciennes tables v1 à v6 restent prises en
-charge.
+générique de l’UI Toolkit. L’ABI v8 expose la navigation vers la classe
+parente : les mods peuvent retrouver un service ou un membre hérité par sa
+structure complète, sans dépendre du nom obfusqué de sa classe de base. Les
+anciennes tables v1 à v7 restent prises en charge.
 
 ## Développer un mod en Rust
 
@@ -296,6 +316,16 @@ let method = runtime.instance_method(
     some_class,
     c"set_enabled",
     &[c"System.Boolean"],
+);
+
+let parent = runtime.class_parent(some_class);
+let run = runtime.unique_method_by_signature(
+    animator,
+    None,
+    Some(c"System.Void"),
+    &[c"System.Single"],
+    DNH_MEMBER_STORAGE_INSTANCE,
+    "Animator2D.Run(float)",
 );
 ```
 

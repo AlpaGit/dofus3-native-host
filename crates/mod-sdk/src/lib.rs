@@ -1,9 +1,9 @@
 use dofus_native_mod_api::{
-    DNH_ABI_VERSION_4, DNH_ABI_VERSION_5, DNH_ABI_VERSION_6, DNH_ABI_VERSION_7,
+    DNH_ABI_VERSION_4, DNH_ABI_VERSION_5, DNH_ABI_VERSION_6, DNH_ABI_VERSION_7, DNH_ABI_VERSION_8,
     DNH_MEMBER_STORAGE_INSTANCE, DNH_OK, DnhClassInfoV2, DnhFieldInfoV2, DnhFieldSignatureV3,
     DnhGcHandleV4, DnhHandle, DnhHookApiV5, DnhHostApiV1, DnhHostApiV4, DnhHostApiV5, DnhLogLevel,
-    DnhMethodSignatureV3, DnhUnityApiV2, DnhUnityApiV3, DnhUnityApiV4, DnhUnityApiV6,
-    DnhUnityApiV7,
+    DnhMethodInfoV2, DnhMethodSignatureV3, DnhUnityApiV2, DnhUnityApiV3, DnhUnityApiV4,
+    DnhUnityApiV6, DnhUnityApiV7, DnhUnityApiV8,
 };
 use std::ffi::{CStr, c_void};
 use std::mem::{MaybeUninit, size_of};
@@ -27,14 +27,18 @@ unsafe impl Sync for Runtime {}
 impl Runtime {
     /// # Safety
     ///
-    /// `host_api` must be a process-lifetime ABI v4, v5 or v6 table supplied by the
+    /// `host_api` must be a process-lifetime ABI v4 through v8 table supplied by the
     /// native host.
     pub unsafe fn bind(host_api: *const DnhHostApiV1) -> Option<Self> {
         let host = NonNull::new(host_api.cast_mut().cast::<DnhHostApiV4>())?;
         let host_ref = unsafe { host.as_ref() };
         if !matches!(
             host_ref.abi_version,
-            DNH_ABI_VERSION_4 | DNH_ABI_VERSION_5 | DNH_ABI_VERSION_6 | DNH_ABI_VERSION_7
+            DNH_ABI_VERSION_4
+                | DNH_ABI_VERSION_5
+                | DNH_ABI_VERSION_6
+                | DNH_ABI_VERSION_7
+                | DNH_ABI_VERSION_8
         ) || host_ref.struct_size < size_of::<DnhHostApiV4>() as u32
         {
             return None;
@@ -63,21 +67,30 @@ impl Runtime {
 
     pub fn v6(self) -> Option<&'static DnhUnityApiV6> {
         let host = unsafe { self.host.as_ref() };
-        matches!(host.abi_version, DNH_ABI_VERSION_6 | DNH_ABI_VERSION_7)
-            .then(|| unsafe { &*self.unity.as_ptr().cast::<DnhUnityApiV6>() })
+        matches!(
+            host.abi_version,
+            DNH_ABI_VERSION_6 | DNH_ABI_VERSION_7 | DNH_ABI_VERSION_8
+        )
+        .then(|| unsafe { &*self.unity.as_ptr().cast::<DnhUnityApiV6>() })
     }
 
     pub fn v7(self) -> Option<&'static DnhUnityApiV7> {
         let host = unsafe { self.host.as_ref() };
-        (host.abi_version == DNH_ABI_VERSION_7)
+        matches!(host.abi_version, DNH_ABI_VERSION_7 | DNH_ABI_VERSION_8)
             .then(|| unsafe { &*self.unity.as_ptr().cast::<DnhUnityApiV7>() })
+    }
+
+    pub fn v8(self) -> Option<&'static DnhUnityApiV8> {
+        let host = unsafe { self.host.as_ref() };
+        (host.abi_version == DNH_ABI_VERSION_8)
+            .then(|| unsafe { &*self.unity.as_ptr().cast::<DnhUnityApiV8>() })
     }
 
     pub fn v5_hooks(self) -> Option<&'static DnhHookApiV5> {
         let host = unsafe { self.host.as_ref() };
         if !matches!(
             host.abi_version,
-            DNH_ABI_VERSION_5 | DNH_ABI_VERSION_6 | DNH_ABI_VERSION_7
+            DNH_ABI_VERSION_5 | DNH_ABI_VERSION_6 | DNH_ABI_VERSION_7 | DNH_ABI_VERSION_8
         ) || host.struct_size < size_of::<DnhHostApiV5>() as u32
         {
             return None;
@@ -162,6 +175,75 @@ impl Runtime {
             }
         }
         fields
+    }
+
+    pub fn methods_by_signature(
+        self,
+        class: DnhHandle,
+        name: Option<&CStr>,
+        return_type: Option<&CStr>,
+        parameter_types: &[&CStr],
+        storage: u8,
+    ) -> Vec<DnhHandle> {
+        if class.is_null() {
+            return Vec::new();
+        }
+        let parameter_type_names = parameter_types
+            .iter()
+            .map(|value| value.as_ptr())
+            .collect::<Vec<_>>();
+        let signature = DnhMethodSignatureV3 {
+            struct_size: size_of::<DnhMethodSignatureV3>() as u32,
+            name: name.map_or(null(), CStr::as_ptr),
+            return_type_name: return_type.map_or(null(), CStr::as_ptr),
+            parameter_count: parameter_types.len() as i32,
+            parameter_type_names: if parameter_type_names.is_empty() {
+                null()
+            } else {
+                parameter_type_names.as_ptr()
+            },
+            parameter_type_count: parameter_type_names.len() as u32,
+            storage,
+            reserved: [0; 3],
+        };
+        let count =
+            unsafe { (self.v3().find_methods_by_signature)(class, &signature, null_mut(), 0) };
+        let mut methods = vec![null_mut(); count];
+        if count != 0 {
+            unsafe {
+                (self.v3().find_methods_by_signature)(
+                    class,
+                    &signature,
+                    methods.as_mut_ptr(),
+                    methods.len(),
+                );
+            }
+        }
+        methods
+    }
+
+    pub fn unique_method_by_signature(
+        self,
+        class: DnhHandle,
+        name: Option<&CStr>,
+        return_type: Option<&CStr>,
+        parameter_types: &[&CStr],
+        storage: u8,
+        label: &str,
+    ) -> Option<DnhHandle> {
+        let methods = self.methods_by_signature(class, name, return_type, parameter_types, storage);
+        if methods.len() == 1 {
+            methods.first().copied()
+        } else {
+            self.log(
+                DnhLogLevel::Error,
+                &format!(
+                    "{label}: expected one method signature match, found {}.",
+                    methods.len()
+                ),
+            );
+            None
+        }
     }
 
     pub fn method(
@@ -341,6 +423,15 @@ impl Runtime {
                 .is_some_and(|api| unsafe { (api.class_is_assignable_from)(base, candidate) })
     }
 
+    pub fn class_parent(self, class: DnhHandle) -> DnhHandle {
+        if class.is_null() {
+            return null_mut();
+        }
+        self.v8()
+            .map(|api| unsafe { (api.class_parent)(class) })
+            .unwrap_or(null_mut())
+    }
+
     pub fn object_is(self, object: DnhHandle, base: DnhHandle) -> bool {
         if object.is_null() || base.is_null() {
             return false;
@@ -464,6 +555,24 @@ impl Runtime {
             reserved: [0; 3],
         };
         if !unsafe { (self.v2().copy_field_info)(field, &mut info) } || info.name.is_null() {
+            return "<unknown>".to_owned();
+        }
+        unsafe { CStr::from_ptr(info.name) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    pub fn method_name(self, method: DnhHandle) -> String {
+        let mut info = DnhMethodInfoV2 {
+            struct_size: size_of::<DnhMethodInfoV2>() as u32,
+            name: null(),
+            return_type_name: null(),
+            parameter_count: 0,
+            flags: 0,
+            is_static: 0,
+            reserved: [0; 3],
+        };
+        if !unsafe { (self.v2().copy_method_info)(method, &mut info) } || info.name.is_null() {
             return "<unknown>".to_owned();
         }
         unsafe { CStr::from_ptr(info.name) }

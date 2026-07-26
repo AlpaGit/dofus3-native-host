@@ -3,12 +3,13 @@ mod marketplace;
 
 use dofus_native_mod_api::{
     DNH_ABI_VERSION_1, DNH_ABI_VERSION_2, DNH_ABI_VERSION_3, DNH_ABI_VERSION_4, DNH_ABI_VERSION_5,
-    DNH_ABI_VERSION_6, DNH_ABI_VERSION_7, DNH_ERROR, DNH_OK, DnhClassInfoV2, DnhClassSignatureV3,
-    DnhFieldInfoV2, DnhFieldSignatureV3, DnhGcHandleV4, DnhHookApiV5, DnhHostApiV1, DnhHostApiV2,
-    DnhHostApiV3, DnhHostApiV4, DnhHostApiV5, DnhHostApiV6, DnhHostApiV7, DnhLogLevel,
-    DnhMethodInfoV2, DnhMethodSignatureV3, DnhModInfoV1, DnhUnityApiV1, DnhUnityApiV2,
-    DnhUnityApiV3, DnhUnityApiV4, DnhUnityApiV6, DnhUnityApiV7, DnmLoadFn, DnmQueryFn, DnmTickFn,
-    DnmUnloadFn, LOAD_EXPORT, QUERY_EXPORT, TICK_EXPORT, UNLOAD_EXPORT,
+    DNH_ABI_VERSION_6, DNH_ABI_VERSION_7, DNH_ABI_VERSION_8, DNH_ERROR, DNH_OK, DnhClassInfoV2,
+    DnhClassSignatureV3, DnhFieldInfoV2, DnhFieldSignatureV3, DnhGcHandleV4, DnhHookApiV5,
+    DnhHostApiV1, DnhHostApiV2, DnhHostApiV3, DnhHostApiV4, DnhHostApiV5, DnhHostApiV6,
+    DnhHostApiV7, DnhHostApiV8, DnhLogLevel, DnhMethodInfoV2, DnhMethodSignatureV3, DnhModInfoV1,
+    DnhUnityApiV1, DnhUnityApiV2, DnhUnityApiV3, DnhUnityApiV4, DnhUnityApiV6, DnhUnityApiV7,
+    DnhUnityApiV8, DnmLoadFn, DnmQueryFn, DnmTickFn, DnmUnloadFn, LOAD_EXPORT, QUERY_EXPORT,
+    TICK_EXPORT, UNLOAD_EXPORT,
 };
 use manager_ui::{InstalledModView, UiAction, UiController, UiSnapshot};
 use marketplace::{MarketplaceMod, WorkerResult};
@@ -148,6 +149,7 @@ unsafe extern "C" {
         arguments: *const HModule,
         exception: *mut HModule,
     ) -> HModule;
+    fn dnh_unity_class_parent(class_handle: HModule) -> HModule;
     fn dnh_unity_find_fields_by_signature(
         class_handle: HModule,
         signature: *const DnhFieldSignatureV3,
@@ -426,6 +428,10 @@ unsafe extern "system" fn unity_runtime_invoke_virtual(
     unsafe { dnh_unity_runtime_invoke_virtual(method_handle, object, arguments, exception) }
 }
 
+unsafe extern "system" fn unity_class_parent(class_handle: HModule) -> HModule {
+    unsafe { dnh_unity_class_parent(class_handle) }
+}
+
 unsafe extern "system" fn unity_find_fields_by_signature(
     class_handle: HModule,
     signature: *const DnhFieldSignatureV3,
@@ -566,6 +572,22 @@ static UNITY_API_V7: SyncUnityApiV7 = SyncUnityApiV7(DnhUnityApiV7 {
     class_is_assignable_from: unity_class_is_assignable_from,
     copy_string_utf8: unity_copy_string_utf8,
     runtime_invoke_virtual: unity_runtime_invoke_virtual,
+});
+
+struct SyncUnityApiV8(DnhUnityApiV8);
+unsafe impl Sync for SyncUnityApiV8 {}
+
+static UNITY_API_V8: SyncUnityApiV8 = SyncUnityApiV8(DnhUnityApiV8 {
+    v7: DnhUnityApiV7 {
+        v6: DnhUnityApiV6 {
+            v4: make_unity_api_v4(DNH_ABI_VERSION_8),
+            inflate_generic_method: unity_inflate_generic_method,
+        },
+        class_is_assignable_from: unity_class_is_assignable_from,
+        copy_string_utf8: unity_copy_string_utf8,
+        runtime_invoke_virtual: unity_runtime_invoke_virtual,
+    },
+    class_parent: unity_class_parent,
 });
 
 fn hooks() -> &'static Mutex<BTreeMap<usize, usize>> {
@@ -747,6 +769,17 @@ static HOST_API_V7: SyncHostApiV7 = SyncHostApiV7(DnhHostApiV7 {
     struct_size: size_of::<DnhHostApiV7>() as u32,
     log: host_log_callback,
     unity: &UNITY_API_V7.0,
+    hooks: &HOOK_API_V5.0,
+});
+
+struct SyncHostApiV8(DnhHostApiV8);
+unsafe impl Sync for SyncHostApiV8 {}
+
+static HOST_API_V8: SyncHostApiV8 = SyncHostApiV8(DnhHostApiV8 {
+    abi_version: DNH_ABI_VERSION_8,
+    struct_size: size_of::<DnhHostApiV8>() as u32,
+    log: host_log_callback,
+    unity: &UNITY_API_V8.0,
     hooks: &HOOK_API_V5.0,
 });
 
@@ -940,6 +973,7 @@ fn query_mod(module: HModule) -> Result<ModMetadata, String> {
         let mut negotiated_abi = 0;
         let mut info_ptr = std::ptr::null();
         for abi_version in [
+            DNH_ABI_VERSION_8,
             DNH_ABI_VERSION_7,
             DNH_ABI_VERSION_6,
             DNH_ABI_VERSION_5,
@@ -959,7 +993,7 @@ fn query_mod(module: HModule) -> Result<ModMetadata, String> {
 
         let info = info_ptr
             .as_ref()
-            .ok_or_else(|| "DNM_Query rejected ABI v7, v6, v5, v4, v3, v2 and v1".to_owned())?;
+            .ok_or_else(|| "DNM_Query rejected ABI v8, v7, v6, v5, v4, v3, v2 and v1".to_owned())?;
         if info.abi_version != negotiated_abi || info.struct_size < size_of::<DnhModInfoV1>() as u32
         {
             return Err("invalid DnhModInfoV1 descriptor".to_owned());
@@ -1000,6 +1034,7 @@ fn load_one(path: &Path) -> Result<LoadedMod, String> {
             let metadata = query_mod(module)?;
 
             let host_api = match metadata.abi_version {
+                DNH_ABI_VERSION_8 => (&HOST_API_V8.0 as *const DnhHostApiV8).cast::<DnhHostApiV1>(),
                 DNH_ABI_VERSION_7 => (&HOST_API_V7.0 as *const DnhHostApiV7).cast::<DnhHostApiV1>(),
                 DNH_ABI_VERSION_6 => (&HOST_API_V6.0 as *const DnhHostApiV6).cast::<DnhHostApiV1>(),
                 DNH_ABI_VERSION_5 => (&HOST_API_V5.0 as *const DnhHostApiV5).cast::<DnhHostApiV1>(),
@@ -1217,7 +1252,7 @@ fn control_status(state: &HostState) -> String {
     format!(
         "{{\"running\":true,\"pid\":{},\"abiVersion\":{},\"controlDirectory\":{},\"mods\":[{}]}}",
         std::process::id(),
-        DNH_ABI_VERSION_7,
+        DNH_ABI_VERSION_8,
         json_string(&state.control_directory.display().to_string()),
         mods,
     )
@@ -1697,7 +1732,7 @@ pub unsafe extern "system" fn DNH_Initialize(
 
     write_log(
         DnhLogLevel::Info,
-        &format!("Dofus Native Host ABI v{DNH_ABI_VERSION_7} starting"),
+        &format!("Dofus Native Host ABI v{DNH_ABI_VERSION_8} starting"),
     );
     write_log(
         DnhLogLevel::Info,

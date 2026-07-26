@@ -23,7 +23,8 @@ extern "C" {
 #define DNH_ABI_VERSION_5 5u
 #define DNH_ABI_VERSION_6 6u
 #define DNH_ABI_VERSION_7 7u
-#define DNH_ABI_VERSION DNH_ABI_VERSION_7
+#define DNH_ABI_VERSION_8 8u
+#define DNH_ABI_VERSION DNH_ABI_VERSION_8
 #define DNH_OK 0
 #define DNH_ERROR (-1)
 
@@ -270,6 +271,11 @@ typedef struct DnhUnityApiV7 {
         DnhHandle* exception);
 } DnhUnityApiV7;
 
+typedef struct DnhUnityApiV8 {
+    DnhUnityApiV7 v7;
+    DnhHandle(DNH_CALL* class_parent)(DnhHandle class_handle);
+} DnhUnityApiV8;
+
 typedef struct DnhHostApiV1 {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -347,6 +353,17 @@ typedef struct DnhHostApiV7 {
     const DnhUnityApiV7* unity;
     const DnhHookApiV5* hooks;
 } DnhHostApiV7;
+
+typedef struct DnhHostApiV8 {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    void(DNH_CALL* log)(
+        DnhLogLevel level,
+        const uint8_t* message,
+        size_t message_len);
+    const DnhUnityApiV8* unity;
+    const DnhHookApiV5* hooks;
+} DnhHostApiV8;
 
 typedef struct DnhModInfoV1 {
     uint32_t abi_version;

@@ -43,6 +43,9 @@ try {
         (Join-Path $root "target\$profileDirectory\dofus_native_interface_analyzer.dll") `
         (Join-Path $mods "DofusInterfaceAnalyzer.dll")
     Copy-Item -Force `
+        (Join-Path $root "target\$profileDirectory\dofus_native_combat_animation_skipper.dll") `
+        (Join-Path $mods "DofusCombatAnimationSkipper.dll")
+    Copy-Item -Force `
         (Join-Path $root "include\dofus_native_mod_api.h") `
         (Join-Path $dist "dofus_native_mod_api.h")
 
@@ -126,6 +129,9 @@ try {
     Copy-Item -Force `
         (Join-Path $mods "DofusNativeTactical.dll") `
         (Join-Path $dofusMods "DofusNativeTactical.dll")
+    Copy-Item -Force `
+        (Join-Path $mods "DofusCombatAnimationSkipper.dll") `
+        (Join-Path $dofusMods "DofusCombatAnimationSkipper.dll")
 
     Write-Host "Build ready: $dist"
 }

@@ -49,6 +49,18 @@
       "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.3.1/DofusInterfaceAnalyzer.dll",
       "sha256": "bc9c6b813526d039e6d833a2fcdda20788c71004a27b075207f261526fe64499",
       "homepage": "https://github.com/AlpaGit/dofus3-native-host"
+    },
+    {
+      "id": "bubble.dofus3.combat-animation-skipper",
+      "name": "Dofus Combat Animation Skipper",
+      "author": "Bubble",
+      "description": "Termine immédiatement les animations Animator2D non bouclées uniquement pendant les combats, tout en conservant leur frame finale et leurs événements de fin. Résolution structurelle résistante à l'obfuscation.",
+      "version": "1.0.0",
+      "abiVersion": 8,
+      "fileName": "DofusCombatAnimationSkipper.dll",
+      "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.4.0/DofusCombatAnimationSkipper.dll",
+      "sha256": "db5a56ebab5d6fcc2592f85fd72bae2786c8cfd2748ef025574e5cad0927b715",
+      "homepage": "https://github.com/AlpaGit/dofus3-native-host"
     }
   ]
 }
