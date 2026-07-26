@@ -8,7 +8,8 @@ pub const DNH_ABI_VERSION_3: u32 = 3;
 pub const DNH_ABI_VERSION_4: u32 = 4;
 pub const DNH_ABI_VERSION_5: u32 = 5;
 pub const DNH_ABI_VERSION_6: u32 = 6;
-pub const DNH_ABI_VERSION: u32 = DNH_ABI_VERSION_6;
+pub const DNH_ABI_VERSION_7: u32 = 7;
+pub const DNH_ABI_VERSION: u32 = DNH_ABI_VERSION_7;
 pub const DNH_OK: i32 = 0;
 pub const DNH_ERROR: i32 = -1;
 
@@ -290,6 +291,25 @@ pub struct DnhUnityApiV6 {
     pub inflate_generic_method: DnhUnityInflateGenericMethodFn,
 }
 
+pub type DnhUnityClassIsAssignableFromFn =
+    unsafe extern "system" fn(base_class: DnhHandle, candidate_class: DnhHandle) -> bool;
+pub type DnhUnityCopyStringUtf8Fn =
+    unsafe extern "system" fn(string_object: DnhHandle, output: *mut u8, capacity: usize) -> usize;
+pub type DnhUnityRuntimeInvokeVirtualFn = unsafe extern "system" fn(
+    method_handle: DnhHandle,
+    object: DnhHandle,
+    arguments: *const DnhHandle,
+    exception: *mut DnhHandle,
+) -> DnhHandle;
+
+#[repr(C)]
+pub struct DnhUnityApiV7 {
+    pub v6: DnhUnityApiV6,
+    pub class_is_assignable_from: DnhUnityClassIsAssignableFromFn,
+    pub copy_string_utf8: DnhUnityCopyStringUtf8Fn,
+    pub runtime_invoke_virtual: DnhUnityRuntimeInvokeVirtualFn,
+}
+
 #[repr(C)]
 pub struct DnhHostApiV1 {
     pub abi_version: u32,
@@ -354,6 +374,15 @@ pub struct DnhHostApiV6 {
 }
 
 #[repr(C)]
+pub struct DnhHostApiV7 {
+    pub abi_version: u32,
+    pub struct_size: u32,
+    pub log: DnhLogFn,
+    pub unity: *const DnhUnityApiV7,
+    pub hooks: *const DnhHookApiV5,
+}
+
+#[repr(C)]
 pub struct DnhModInfoV1 {
     pub abi_version: u32,
     pub struct_size: u32,
@@ -379,12 +408,18 @@ mod tests {
     use core::mem::{offset_of, size_of};
 
     #[test]
-    fn abi_v6_keeps_the_v5_host_prefix() {
+    fn newer_abis_keep_the_v5_host_prefix() {
         assert_eq!(size_of::<DnhHostApiV6>(), size_of::<DnhHostApiV5>());
+        assert_eq!(size_of::<DnhHostApiV7>(), size_of::<DnhHostApiV6>());
         assert_eq!(
             offset_of!(DnhHostApiV6, hooks),
             offset_of!(DnhHostApiV5, hooks)
         );
+        assert_eq!(
+            offset_of!(DnhHostApiV7, hooks),
+            offset_of!(DnhHostApiV6, hooks)
+        );
         assert!(size_of::<DnhUnityApiV6>() > size_of::<DnhUnityApiV4>());
+        assert!(size_of::<DnhUnityApiV7>() > size_of::<DnhUnityApiV6>());
     }
 }

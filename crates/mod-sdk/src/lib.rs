@@ -1,8 +1,9 @@
 use dofus_native_mod_api::{
-    DNH_ABI_VERSION_4, DNH_ABI_VERSION_5, DNH_ABI_VERSION_6, DNH_MEMBER_STORAGE_INSTANCE, DNH_OK,
-    DnhFieldInfoV2, DnhFieldSignatureV3, DnhGcHandleV4, DnhHandle, DnhHookApiV5, DnhHostApiV1,
-    DnhHostApiV4, DnhHostApiV5, DnhLogLevel, DnhMethodSignatureV3, DnhUnityApiV2, DnhUnityApiV3,
-    DnhUnityApiV4, DnhUnityApiV6,
+    DNH_ABI_VERSION_4, DNH_ABI_VERSION_5, DNH_ABI_VERSION_6, DNH_ABI_VERSION_7,
+    DNH_MEMBER_STORAGE_INSTANCE, DNH_OK, DnhClassInfoV2, DnhFieldInfoV2, DnhFieldSignatureV3,
+    DnhGcHandleV4, DnhHandle, DnhHookApiV5, DnhHostApiV1, DnhHostApiV4, DnhHostApiV5, DnhLogLevel,
+    DnhMethodSignatureV3, DnhUnityApiV2, DnhUnityApiV3, DnhUnityApiV4, DnhUnityApiV6,
+    DnhUnityApiV7,
 };
 use std::ffi::{CStr, c_void};
 use std::mem::{MaybeUninit, size_of};
@@ -33,7 +34,7 @@ impl Runtime {
         let host_ref = unsafe { host.as_ref() };
         if !matches!(
             host_ref.abi_version,
-            DNH_ABI_VERSION_4 | DNH_ABI_VERSION_5 | DNH_ABI_VERSION_6
+            DNH_ABI_VERSION_4 | DNH_ABI_VERSION_5 | DNH_ABI_VERSION_6 | DNH_ABI_VERSION_7
         ) || host_ref.struct_size < size_of::<DnhHostApiV4>() as u32
         {
             return None;
@@ -62,14 +63,22 @@ impl Runtime {
 
     pub fn v6(self) -> Option<&'static DnhUnityApiV6> {
         let host = unsafe { self.host.as_ref() };
-        (host.abi_version == DNH_ABI_VERSION_6)
+        matches!(host.abi_version, DNH_ABI_VERSION_6 | DNH_ABI_VERSION_7)
             .then(|| unsafe { &*self.unity.as_ptr().cast::<DnhUnityApiV6>() })
+    }
+
+    pub fn v7(self) -> Option<&'static DnhUnityApiV7> {
+        let host = unsafe { self.host.as_ref() };
+        (host.abi_version == DNH_ABI_VERSION_7)
+            .then(|| unsafe { &*self.unity.as_ptr().cast::<DnhUnityApiV7>() })
     }
 
     pub fn v5_hooks(self) -> Option<&'static DnhHookApiV5> {
         let host = unsafe { self.host.as_ref() };
-        if !matches!(host.abi_version, DNH_ABI_VERSION_5 | DNH_ABI_VERSION_6)
-            || host.struct_size < size_of::<DnhHostApiV5>() as u32
+        if !matches!(
+            host.abi_version,
+            DNH_ABI_VERSION_5 | DNH_ABI_VERSION_6 | DNH_ABI_VERSION_7
+        ) || host.struct_size < size_of::<DnhHostApiV5>() as u32
         {
             return None;
         }
@@ -239,15 +248,51 @@ impl Runtime {
         }
     }
 
+    pub fn invoke_virtual(
+        self,
+        method: DnhHandle,
+        object: DnhHandle,
+        arguments: &[DnhHandle],
+    ) -> Option<DnhHandle> {
+        if method.is_null() || object.is_null() {
+            return None;
+        }
+        let api = self.v7()?;
+        let mut exception = null_mut();
+        let result = unsafe {
+            (api.runtime_invoke_virtual)(
+                method,
+                object,
+                if arguments.is_empty() {
+                    null()
+                } else {
+                    arguments.as_ptr()
+                },
+                &mut exception,
+            )
+        };
+        if !exception.is_null() {
+            self.log(
+                DnhLogLevel::Error,
+                &format!("IL2CPP virtual invocation raised exception {exception:p}"),
+            );
+            None
+        } else {
+            Some(result)
+        }
+    }
+
     pub fn unbox<T: Copy>(self, boxed: DnhHandle) -> Option<T> {
+        let value = self.unboxed_handle(boxed)?;
+        Some(unsafe { value.cast::<T>().read_unaligned() })
+    }
+
+    pub fn unboxed_handle(self, boxed: DnhHandle) -> Option<DnhHandle> {
         if boxed.is_null() {
             return None;
         }
         let value = unsafe { (self.v2().object_unbox)(boxed) };
-        if value.is_null() {
-            return None;
-        }
-        Some(unsafe { value.cast::<T>().read_unaligned() })
+        (!value.is_null()).then_some(value)
     }
 
     pub fn string(self, value: &str) -> DnhHandle {
@@ -255,6 +300,114 @@ impl Runtime {
             return null_mut();
         };
         unsafe { (self.v2().string_new_utf8)(value.as_ptr()) }
+    }
+
+    pub fn managed_string(self, value: DnhHandle) -> Option<String> {
+        if value.is_null() {
+            return None;
+        }
+        if let Some(api) = self.v7() {
+            let length = unsafe { (api.copy_string_utf8)(value, null_mut(), 0) };
+            if length > 16 * 1024 * 1024 {
+                return None;
+            }
+            let mut bytes = vec![0_u8; length];
+            if length != 0 {
+                let copied =
+                    unsafe { (api.copy_string_utf8)(value, bytes.as_mut_ptr(), bytes.len()) };
+                if copied != length {
+                    return None;
+                }
+            }
+            return String::from_utf8(bytes).ok();
+        }
+        // IL2CPP strings are an object header, a signed UTF-16 length, then the
+        // inline UTF-16 payload. The host is x64-only, so the header is 16 bytes.
+        let length = unsafe { value.cast::<u8>().add(16).cast::<i32>().read_unaligned() };
+        if !(0..=1_048_576).contains(&length) {
+            return None;
+        }
+        let characters = unsafe {
+            std::slice::from_raw_parts(value.cast::<u8>().add(20).cast::<u16>(), length as usize)
+        };
+        Some(String::from_utf16_lossy(characters))
+    }
+
+    pub fn class_is_assignable_from(self, base: DnhHandle, candidate: DnhHandle) -> bool {
+        !base.is_null()
+            && !candidate.is_null()
+            && self
+                .v7()
+                .is_some_and(|api| unsafe { (api.class_is_assignable_from)(base, candidate) })
+    }
+
+    pub fn object_is(self, object: DnhHandle, base: DnhHandle) -> bool {
+        if object.is_null() || base.is_null() {
+            return false;
+        }
+        let candidate = unsafe { (self.v2().get_object_class)(object) };
+        self.class_is_assignable_from(base, candidate)
+    }
+
+    pub fn class_name(self, class: DnhHandle) -> String {
+        if class.is_null() {
+            return "<unknown>".to_owned();
+        }
+        let mut info = DnhClassInfoV2 {
+            struct_size: size_of::<DnhClassInfoV2>() as u32,
+            name: null(),
+            namespace_name: null(),
+            parent_name: null(),
+            field_count: 0,
+            method_count: 0,
+            is_value_type: 0,
+            reserved: [0; 3],
+        };
+        if !unsafe { (self.v2().copy_class_info)(class, &mut info) } || info.name.is_null() {
+            return "<unknown>".to_owned();
+        }
+        let name = unsafe { CStr::from_ptr(info.name) }.to_string_lossy();
+        if info.namespace_name.is_null() {
+            return name.into_owned();
+        }
+        let namespace = unsafe { CStr::from_ptr(info.namespace_name) }.to_string_lossy();
+        if namespace.is_empty() {
+            name.into_owned()
+        } else {
+            format!("{namespace}.{name}")
+        }
+    }
+
+    pub fn object_class_name(self, object: DnhHandle) -> String {
+        if object.is_null() {
+            return "<null>".to_owned();
+        }
+        let class = unsafe { (self.v2().get_object_class)(object) };
+        self.class_name(class)
+    }
+
+    pub fn find_objects(self, class: DnhHandle) -> Vec<DnhHandle> {
+        if class.is_null() {
+            return Vec::new();
+        }
+        let count = unsafe { (self.v2().find_objects)(class, null_mut(), 0) };
+        let mut objects = vec![null_mut(); count];
+        if count != 0 {
+            unsafe { (self.v2().find_objects)(class, objects.as_mut_ptr(), objects.len()) };
+        }
+        objects
+    }
+
+    pub fn array_references(self, array: DnhHandle) -> Vec<DnhHandle> {
+        if array.is_null() {
+            return Vec::new();
+        }
+        let length = unsafe { (self.v2().array_length)(array) };
+        let data = unsafe { (self.v2().array_data)(array) };
+        if length == 0 || data.is_null() {
+            return Vec::new();
+        }
+        unsafe { std::slice::from_raw_parts(data.cast::<DnhHandle>(), length) }.to_vec()
     }
 
     pub fn read_reference(self, object: DnhHandle, name: &CStr) -> Option<DnhHandle> {

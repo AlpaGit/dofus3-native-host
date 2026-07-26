@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-07-25T23:54:39.7483770+00:00",
+  "updatedAt": "2026-07-26T00:36:35.3850517Z",
   "mods": [
     {
       "id": "bubble.dofus3.native-tactical",
@@ -10,8 +10,8 @@
       "version": "5.0.0",
       "abiVersion": 6,
       "fileName": "DofusNativeTactical.dll",
-      "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.2.0/DofusNativeTactical.dll",
-      "sha256": "e925eccdf883b1b52b5bc01b881dec9e18d4ffb85dd4451a9b5969f629f61ba6",
+      "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.3.0/DofusNativeTactical.dll",
+      "sha256": "d7198b83b83502214c76e09780d4eeef622c91341283b4bb4d314456a1cccb17",
       "homepage": "https://github.com/AlpaGit/dofus3-native-host"
     },
     {
@@ -19,11 +19,35 @@
       "name": "Dofus Network Dumper",
       "author": "Bubble",
       "description": "Capture les paquets Protobuf entrants et sortants, leur payload wire, leurs octets bruts et le vrai nom de leur classe IL2CPP concrète. Les dumps restent locaux.",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "abiVersion": 5,
       "fileName": "DofusNetworkDumper.dll",
-      "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.2.0/DofusNetworkDumper.dll",
-      "sha256": "98560da14b222bd45af7c6a95337d841b7237d8e3bcd3fcc0ade353c6ee54837",
+      "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.3.0/DofusNetworkDumper.dll",
+      "sha256": "b68d922dab903926b4a670b37b390585b4d949b3538a95f3ea2ca66cb37b9932",
+      "homepage": "https://github.com/AlpaGit/dofus3-native-host"
+    },
+    {
+      "id": "bubble.dofus3.runtime-inspector",
+      "name": "Dofus Runtime Inspector",
+      "author": "Bubble",
+      "description": "F9 lance un snapshot progressif des renderers, sprites, matériaux, meshes, Moquettes et textures Unity. Les CSV, PNG et le manifeste restent locaux dans NativeMods/DofusRuntimeDump.",
+      "version": "2.0.0",
+      "abiVersion": 6,
+      "fileName": "DofusRuntimeInspector.dll",
+      "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.3.0/DofusRuntimeInspector.dll",
+      "sha256": "dbfdb587f3d91fa5cf413a50691ef263b117fe893b95bcc37403be86950ca4b2",
+      "homepage": "https://github.com/AlpaGit/dofus3-native-host"
+    },
+    {
+      "id": "bubble.dofus3.interface-analyzer",
+      "name": "Dofus Interface Analyzer",
+      "author": "Bubble",
+      "description": "Analyse progressive de l'UI Toolkit avec F11/F12, inventaire FontAsset avec F10 et capture dynamique Font vers FontAsset. Exporte arbres, styles, textes, polices et atlases en JSON/CSV.",
+      "version": "2.0.0",
+      "abiVersion": 7,
+      "fileName": "DofusInterfaceAnalyzer.dll",
+      "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.3.0/DofusInterfaceAnalyzer.dll",
+      "sha256": "5f9a03fe3580d7c2cf6817d58604b61134a4bbfe6d7461e19ed3f29440428a86",
       "homepage": "https://github.com/AlpaGit/dofus3-native-host"
     }
   ]

@@ -76,14 +76,14 @@ dependencies = [
 
 [[package]]
 name = "dofus-native-example"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dofus-native-mod-api",
 ]
 
 [[package]]
 name = "dofus-native-host"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cc",
  "dofus-native-mod-api",
@@ -96,19 +96,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "dofus-native-interface-analyzer"
+version = "0.3.0"
+dependencies = [
+ "dofus-native-mod-api",
+ "dofus-native-mod-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dofus-native-mod-api"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "dofus-native-mod-sdk"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dofus-native-mod-api",
 ]
 
 [[package]]
 name = "dofus-native-network-dumper"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "dofus-native-mod-api",
@@ -118,8 +128,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dofus-native-runtime-inspector"
+version = "0.3.0"
+dependencies = [
+ "dofus-native-mod-api",
+ "dofus-native-mod-sdk",
+ "serde_json",
+]
+
+[[package]]
 name = "dofus-native-tactical"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dofus-native-mod-api",
  "dofus-native-mod-sdk",

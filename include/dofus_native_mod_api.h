@@ -22,7 +22,8 @@ extern "C" {
 #define DNH_ABI_VERSION_4 4u
 #define DNH_ABI_VERSION_5 5u
 #define DNH_ABI_VERSION_6 6u
-#define DNH_ABI_VERSION DNH_ABI_VERSION_6
+#define DNH_ABI_VERSION_7 7u
+#define DNH_ABI_VERSION DNH_ABI_VERSION_7
 #define DNH_OK 0
 #define DNH_ERROR (-1)
 
@@ -253,6 +254,22 @@ typedef struct DnhUnityApiV6 {
     DnhUnityInflateGenericMethodFn inflate_generic_method;
 } DnhUnityApiV6;
 
+typedef struct DnhUnityApiV7 {
+    DnhUnityApiV6 v6;
+    bool(DNH_CALL* class_is_assignable_from)(
+        DnhHandle base_class,
+        DnhHandle candidate_class);
+    size_t(DNH_CALL* copy_string_utf8)(
+        DnhHandle string_object,
+        uint8_t* output,
+        size_t capacity);
+    DnhHandle(DNH_CALL* runtime_invoke_virtual)(
+        DnhHandle method_handle,
+        DnhHandle object,
+        const DnhHandle* arguments,
+        DnhHandle* exception);
+} DnhUnityApiV7;
+
 typedef struct DnhHostApiV1 {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -319,6 +336,17 @@ typedef struct DnhHostApiV6 {
     const DnhUnityApiV6* unity;
     const DnhHookApiV5* hooks;
 } DnhHostApiV6;
+
+typedef struct DnhHostApiV7 {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    void(DNH_CALL* log)(
+        DnhLogLevel level,
+        const uint8_t* message,
+        size_t message_len);
+    const DnhUnityApiV7* unity;
+    const DnhHookApiV5* hooks;
+} DnhHostApiV7;
 
 typedef struct DnhModInfoV1 {
     uint32_t abi_version;

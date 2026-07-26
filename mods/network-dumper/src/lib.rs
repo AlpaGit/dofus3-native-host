@@ -8,7 +8,7 @@ use dofus_native_mod_api::{
 use dofus_native_mod_sdk::Runtime;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{CStr, c_char};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -36,7 +36,7 @@ static OUTGOING_ORIGINAL: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(null_mut(
 
 static MOD_ID: &[u8] = b"bubble.dofus3.network-dumper\0";
 static MOD_NAME: &[u8] = b"Dofus Network Dumper\0";
-static MOD_VERSION: &[u8] = b"1.0.0\0";
+static MOD_VERSION: &[u8] = b"1.1.0\0";
 static MOD_AUTHOR: &[u8] = b"Bubble\0";
 
 struct SyncModInfo(DnhModInfoV1);
@@ -63,8 +63,11 @@ unsafe impl Send for CaptureRuntime {}
 
 struct OutputState {
     packets: BufWriter<File>,
+    infinite_dream_json: BufWriter<File>,
+    infinite_dream_csv: BufWriter<File>,
     packet_path: PathBuf,
     class_path: PathBuf,
+    infinite_dream_path: PathBuf,
     classes: BTreeSet<String>,
 }
 
@@ -79,6 +82,21 @@ struct PacketRecord {
     payload_length: usize,
     raw_protobuf_base64: String,
     payload: Value,
+    #[serde(skip)]
+    infinite_dream_monsters: Vec<InfiniteDreamMonster>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InfiniteDreamMonster {
+    sequence: u64,
+    captured_at_unix_ms: u128,
+    source_class: String,
+    monster_id: u64,
+    level: u64,
+    entry_field_1: u64,
+    entry_field_5: u64,
+    stats: BTreeMap<u64, u64>,
 }
 
 type IncomingFn = unsafe extern "system" fn(DnhHandle, DnhHandle, DnhHandle, DnhHandle);
@@ -494,18 +512,26 @@ fn capture_packet(direction: &'static str, wrapper: DnhHandle, direct_message: D
             "parseError": "protobuf wire payload could not be decoded"
         })
     });
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
+    let captured_at_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let infinite_dream_monsters = if direction == "incoming" {
+        parse_infinite_dream_monsters(&bytes, sequence, captured_at_unix_ms, &class_name)
+    } else {
+        Vec::new()
+    };
     let record = PacketRecord {
-        sequence: SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1,
-        captured_at_unix_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis())
-            .unwrap_or(0),
+        sequence,
+        captured_at_unix_ms,
         direction,
         message_id,
         class_name,
         payload_length: bytes.len(),
         raw_protobuf_base64: BASE64.encode(&bytes),
         payload,
+        infinite_dream_monsters,
     };
     if let Ok(mut queue) = QUEUE.lock() {
         if queue.len() >= MAX_QUEUED_PACKETS {
@@ -606,15 +632,46 @@ fn create_output() -> Result<OutputState, String> {
         .unwrap_or(0);
     let packet_path = root.join(format!("packets-{session}.jsonl"));
     let class_path = root.join(format!("classes-{session}.json"));
+    let infinite_dream_path = root.join(format!("infinite-dream-monsters-{session}.jsonl"));
+    let infinite_dream_csv_path = root.join(format!("infinite-dream-monsters-{session}.csv"));
     let packets = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(&packet_path)
         .map_err(|error| format!("création de {} impossible : {error}", packet_path.display()))?;
+    let infinite_dream_json = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&infinite_dream_path)
+        .map_err(|error| {
+            format!(
+                "création de {} impossible : {error}",
+                infinite_dream_path.display()
+            )
+        })?;
+    let infinite_dream_csv_file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&infinite_dream_csv_path)
+        .map_err(|error| {
+            format!(
+                "création de {} impossible : {error}",
+                infinite_dream_csv_path.display()
+            )
+        })?;
+    let mut infinite_dream_csv = BufWriter::new(infinite_dream_csv_file);
+    infinite_dream_csv
+        .write_all(
+            b"sequence,capturedAtUnixMs,sourceClass,monsterId,level,entryField1,entryField5,statsJson\n",
+        )
+        .map_err(|error| format!("initialisation CSV impossible : {error}"))?;
     Ok(OutputState {
         packets: BufWriter::new(packets),
+        infinite_dream_json: BufWriter::new(infinite_dream_json),
+        infinite_dream_csv,
         packet_path,
         class_path,
+        infinite_dream_path,
         classes: BTreeSet::new(),
     })
 }
@@ -641,16 +698,163 @@ fn drain_queue() {
     let mut classes_changed = false;
     for record in records {
         classes_changed |= output.classes.insert(record.class_name.clone());
+        for monster in &record.infinite_dream_monsters {
+            if serde_json::to_writer(&mut output.infinite_dream_json, monster).is_ok() {
+                let _ = output.infinite_dream_json.write_all(b"\n");
+            }
+            let stats = serde_json::to_string(&monster.stats).unwrap_or_else(|_| "{}".to_owned());
+            let row = [
+                monster.sequence.to_string(),
+                monster.captured_at_unix_ms.to_string(),
+                csv_cell(&monster.source_class),
+                monster.monster_id.to_string(),
+                monster.level.to_string(),
+                monster.entry_field_1.to_string(),
+                monster.entry_field_5.to_string(),
+                csv_cell(&stats),
+            ]
+            .join(",");
+            let _ = writeln!(output.infinite_dream_csv, "{row}");
+        }
         if serde_json::to_writer(&mut output.packets, &record).is_ok() {
             let _ = output.packets.write_all(b"\n");
         }
     }
     let _ = output.packets.flush();
+    let _ = output.infinite_dream_json.flush();
+    let _ = output.infinite_dream_csv.flush();
     if classes_changed {
         let classes = output.classes.iter().collect::<Vec<_>>();
         if let Ok(json) = serde_json::to_vec_pretty(&classes) {
             let _ = std::fs::write(&output.class_path, json);
         }
+    }
+}
+
+fn csv_cell(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn parse_infinite_dream_monsters(
+    bytes: &[u8],
+    sequence: u64,
+    captured_at_unix_ms: u128,
+    source_class: &str,
+) -> Vec<InfiniteDreamMonster> {
+    let mut position = 0;
+    let mut monsters = Vec::new();
+    while position < bytes.len() {
+        let Some(key) = read_varint(bytes, &mut position, bytes.len()) else {
+            return Vec::new();
+        };
+        let field = key >> 3;
+        let wire_type = (key & 7) as u8;
+        if field == 17 && wire_type == 2 {
+            let Some(range) = read_length_delimited(bytes, &mut position, bytes.len()) else {
+                return Vec::new();
+            };
+            if let Some(monster) = parse_infinite_dream_entry(
+                &bytes[range],
+                sequence,
+                captured_at_unix_ms,
+                source_class,
+            ) {
+                monsters.push(monster);
+            }
+        } else if !skip_wire_value(bytes, &mut position, bytes.len(), wire_type) {
+            return Vec::new();
+        }
+    }
+    monsters
+}
+
+fn parse_infinite_dream_entry(
+    bytes: &[u8],
+    sequence: u64,
+    captured_at_unix_ms: u128,
+    source_class: &str,
+) -> Option<InfiniteDreamMonster> {
+    let mut monster = InfiniteDreamMonster {
+        sequence,
+        captured_at_unix_ms,
+        source_class: source_class.to_owned(),
+        monster_id: 0,
+        level: 0,
+        entry_field_1: 0,
+        entry_field_5: 0,
+        stats: BTreeMap::new(),
+    };
+    let mut position = 0;
+    while position < bytes.len() {
+        let key = read_varint(bytes, &mut position, bytes.len())?;
+        let field = key >> 3;
+        let wire_type = (key & 7) as u8;
+        if wire_type == 0 {
+            let value = read_varint(bytes, &mut position, bytes.len())?;
+            match field {
+                1 => monster.entry_field_1 = value,
+                2 => monster.monster_id = value,
+                4 => monster.level = value,
+                5 => monster.entry_field_5 = value,
+                _ => {}
+            }
+        } else if field == 3 && wire_type == 2 {
+            let range = read_length_delimited(bytes, &mut position, bytes.len())?;
+            let entry = &bytes[range];
+            let mut map_position = 0;
+            let mut stat_id = 0;
+            let mut stat_value = 0;
+            while map_position < entry.len() {
+                let map_key = read_varint(entry, &mut map_position, entry.len())?;
+                let map_field = map_key >> 3;
+                let map_wire_type = (map_key & 7) as u8;
+                if map_wire_type == 0 {
+                    let value = read_varint(entry, &mut map_position, entry.len())?;
+                    if map_field == 1 {
+                        stat_id = value;
+                    } else if map_field == 2 {
+                        stat_value = value;
+                    }
+                } else if !skip_wire_value(entry, &mut map_position, entry.len(), map_wire_type) {
+                    return None;
+                }
+            }
+            monster.stats.insert(stat_id, stat_value);
+        } else if !skip_wire_value(bytes, &mut position, bytes.len(), wire_type) {
+            return None;
+        }
+    }
+    (monster.monster_id != 0 && !monster.stats.is_empty()).then_some(monster)
+}
+
+fn read_length_delimited(
+    bytes: &[u8],
+    position: &mut usize,
+    end: usize,
+) -> Option<std::ops::Range<usize>> {
+    let length = usize::try_from(read_varint(bytes, position, end)?).ok()?;
+    let value_end = position.checked_add(length)?;
+    if value_end > end {
+        return None;
+    }
+    let range = *position..value_end;
+    *position = value_end;
+    Some(range)
+}
+
+fn skip_wire_value(bytes: &[u8], position: &mut usize, end: usize, wire_type: u8) -> bool {
+    match wire_type {
+        0 => read_varint(bytes, position, end).is_some(),
+        1 => {
+            *position = (*position).saturating_add(8);
+            *position <= end
+        }
+        2 => read_length_delimited(bytes, position, end).is_some(),
+        5 => {
+            *position = (*position).saturating_add(4);
+            *position <= end
+        }
+        _ => false,
     }
 }
 
@@ -804,8 +1008,9 @@ pub unsafe extern "system" fn DNM_Load(host_api: *const DnhHostApiV1) -> i32 {
     runtime.log(
         DnhLogLevel::Info,
         &format!(
-            "Dofus Network Dumper écrit les paquets dans {}",
-            output.packet_path.display()
+            "Dofus Network Dumper écrit les paquets dans {} et les monstres de songes dans {}",
+            output.packet_path.display(),
+            output.infinite_dream_path.display()
         ),
     );
     UNLOADING.store(false, Ordering::Release);
@@ -885,6 +1090,8 @@ pub extern "system" fn DNM_Unload() {
     if let Ok(mut state) = OUTPUT.lock() {
         if let Some(output) = state.as_mut() {
             let _ = output.packets.flush();
+            let _ = output.infinite_dream_json.flush();
+            let _ = output.infinite_dream_csv.flush();
         }
         *state = None;
     }
@@ -912,5 +1119,18 @@ mod tests {
     #[test]
     fn rejects_invalid_wire_payload() {
         assert!(parse_wire_payload(&[0x0f]).is_none());
+    }
+
+    #[test]
+    fn structurally_extracts_infinite_dream_monster() {
+        // packet field 17 -> entry { field 2 monsterId, field 3 map, field 4 level }
+        let payload = [
+            0x8a, 0x01, 0x0b, 0x10, 0x2a, 0x1a, 0x04, 0x08, 0x05, 0x10, 0x63, 0x20, 0xc8, 0x01,
+        ];
+        let monsters = parse_infinite_dream_monsters(&payload, 7, 8, "obfuscated.Class");
+        assert_eq!(monsters.len(), 1);
+        assert_eq!(monsters[0].monster_id, 42);
+        assert_eq!(monsters[0].level, 200);
+        assert_eq!(monsters[0].stats.get(&5), Some(&99));
     }
 }

@@ -37,6 +37,18 @@ jobs:
           (Get-FileHash DofusNetworkDumper.dll -Algorithm SHA256).Hash.ToLowerInvariant() `
             + "  DofusNetworkDumper.dll" |
             Set-Content DofusNetworkDumper.sha256
+          Copy-Item `
+            dist/NativeMods/DofusRuntimeInspector.dll `
+            DofusRuntimeInspector.dll
+          (Get-FileHash DofusRuntimeInspector.dll -Algorithm SHA256).Hash.ToLowerInvariant() `
+            + "  DofusRuntimeInspector.dll" |
+            Set-Content DofusRuntimeInspector.sha256
+          Copy-Item `
+            dist/NativeMods/DofusInterfaceAnalyzer.dll `
+            DofusInterfaceAnalyzer.dll
+          (Get-FileHash DofusInterfaceAnalyzer.dll -Algorithm SHA256).Hash.ToLowerInvariant() `
+            + "  DofusInterfaceAnalyzer.dll" |
+            Set-Content DofusInterfaceAnalyzer.sha256
           Compress-Archive `
             -Path dist/DofusRuntime/* `
             -DestinationPath Dofus3NativeHost-windows-x64.zip
@@ -73,6 +85,10 @@ jobs:
             DofusNativeTactical.sha256 `
             DofusNetworkDumper.dll `
             DofusNetworkDumper.sha256 `
+            DofusRuntimeInspector.dll `
+            DofusRuntimeInspector.sha256 `
+            DofusInterfaceAnalyzer.dll `
+            DofusInterfaceAnalyzer.sha256 `
             --generate-notes `
             --title "Dofus 3 Native Host $env:GITHUB_REF_NAME"
 
@@ -91,6 +107,14 @@ jobs:
             Where-Object id -eq 'bubble.dofus3.network-dumper'
           $network.downloadUrl = "https://github.com/AlpaGit/dofus3-native-host/releases/download/$tag/DofusNetworkDumper.dll"
           $network.sha256 = (Get-FileHash DofusNetworkDumper.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          $inspector = $catalog.mods |
+            Where-Object id -eq 'bubble.dofus3.runtime-inspector'
+          $inspector.downloadUrl = "https://github.com/AlpaGit/dofus3-native-host/releases/download/$tag/DofusRuntimeInspector.dll"
+          $inspector.sha256 = (Get-FileHash DofusRuntimeInspector.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          $interface = $catalog.mods |
+            Where-Object id -eq 'bubble.dofus3.interface-analyzer'
+          $interface.downloadUrl = "https://github.com/AlpaGit/dofus3-native-host/releases/download/$tag/DofusInterfaceAnalyzer.dll"
+          $interface.sha256 = (Get-FileHash DofusInterfaceAnalyzer.dll -Algorithm SHA256).Hash.ToLowerInvariant()
           $catalog.updatedAt = [DateTimeOffset]::UtcNow.ToString('O')
           $catalog | ConvertTo-Json -Depth 10 |
             Set-Content marketplace.json -Encoding utf8

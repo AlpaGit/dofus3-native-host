@@ -46,13 +46,48 @@ présent sur disque, mais le host ne le charge plus aux lancements suivants.
   les noms obfusqués actuels en dur.
 - Enregistre pour chaque paquet la direction, l’identifiant entrant, le vrai
   type IL2CPP concret, le payload wire décodé et les octets Protobuf en base64.
+- Détecte structurellement les entrées de monstres des Songes Infinis dans le
+  wire Protobuf, sans dépendre des noms obfusqués `iyn/fsuj`, puis exporte leur
+  niveau et leurs statistiques.
 - Sorties : `NativeMods/DofusNetworkDump/packets-*.jsonl` et
-  `NativeMods/DofusNetworkDump/classes-*.json`.
+  `NativeMods/DofusNetworkDump/classes-*.json`, plus
+  `infinite-dream-monsters-*.jsonl/.csv` lorsqu’un paquet compatible passe.
 - Code : [mods/network-dumper](https://github.com/AlpaGit/dofus3-native-host/tree/main/mods/network-dumper).
 
 > [!WARNING]
 > Un dump réseau peut contenir des messages privés ou des données de compte.
 > Ne publiez jamais le dossier `DofusNetworkDump` sans l’avoir relu et nettoyé.
+
+### Dofus Runtime Inspector
+
+- Installable volontairement depuis la marketplace `F1`.
+- `F9` lance un snapshot progressif des renderers Unity afin de ne pas bloquer
+  toute l’inspection dans une seule frame.
+- Exporte les chemins de scène, transforms, bounds, sorting layers, matériaux,
+  shaders, propriétés couleur/flottant/vecteur, sprites et meshes.
+- Produit un `moquettes.csv` spécialisé avec un aperçu borné des vertices, UV
+  et couleurs, ainsi que les textures référencées en PNG quand Unity permet
+  leur copie.
+- Ajoute un `manifest.json` récapitulatif et plafonne les exports lourds pour
+  éviter une consommation mémoire ou disque incontrôlée.
+- Sorties : `NativeMods/DofusRuntimeDump/<session>/`.
+- Code : [mods/runtime-inspector](https://github.com/AlpaGit/dofus3-native-host/tree/main/mods/runtime-inspector).
+
+### Dofus Interface Analyzer
+
+- Remplace et élargit l’ancien mod MelonLoader `DofusFontDumper`.
+- `F11` exporte progressivement les arbres UI Toolkit et `F12` ajoute les
+  styles/layouts résolus, sans monopoliser une frame Unity.
+- `F10` inventorie tous les `FontAsset`, leur famille, style, police source et
+  textures d’atlas.
+- Capture automatiquement les résolutions dynamiques
+  `UnityEngine.Font -> TextCore FontAsset`.
+- Produit des JSON/JSONL structurés et un CSV dédié aux textes, chemins UI et
+  polices réellement utilisées.
+- Requiert l’ABI v7 pour le test d’héritage IL2CPP, les chaînes UTF-8 sûres et
+  le dispatch des méthodes virtuelles.
+- Sorties : `NativeMods/DofusInterfaceAnalyzer/<session>/`.
+- Code : [mods/interface-analyzer](https://github.com/AlpaGit/dofus3-native-host/tree/main/mods/interface-analyzer).
 
 ### Native Example
 
@@ -159,7 +194,7 @@ NativeMods/native-host.log
 Un démarrage sain contient notamment :
 
 ```text
-Dofus Native Host ABI v6 starting
+Dofus Native Host ABI v7 starting
 Dofus 3 Native Tactical negotiated native ABI v6
 native mod manager ready; press F1 to open
 Ready. Press F8 to toggle native tactical mode (Rust SDK, native sprites, ABI v6).
@@ -194,10 +229,11 @@ Pour publier ou mettre à jour un mod :
 4. vérifiez que `fileName` contient uniquement un nom de DLL, sans chemin.
 
 Le schéma courant est `schemaVersion: 1`. Le workflow de release joint
-automatiquement `DofusNativeTactical.dll`, `DofusNetworkDumper.dll` et leurs
-fichiers `.sha256` aux nouveaux tags.
+automatiquement `DofusNativeTactical.dll`, `DofusNetworkDumper.dll`,
+`DofusRuntimeInspector.dll`, `DofusInterfaceAnalyzer.dll` et leurs fichiers
+`.sha256` aux nouveaux tags.
 
-## Pourquoi une ABI v6 ?
+## Pourquoi une ABI v7 ?
 
 Dofus 3 utilise Unity 6 et IL2CPP. Les noms du code du jeu peuvent être
 obfusqués et changer entre deux builds. L’ABI évite donc de dépendre uniquement
@@ -215,8 +251,11 @@ L’ABI v5 ajoute un service global de detours natifs avec trampoline, désactiv
 et nettoyage automatique au déchargement d’un mod. C’est ce qui remplace
 Harmony pour le dumper réseau. L’ABI v6 ajoute l’inflation globale des méthodes
 IL2CPP génériques : un mod peut par exemple résoudre
-`LoadAssetAsync<GameObject>` sans MelonLoader ni nom obfusqué. Les anciennes
-tables v1 à v5 restent prises en charge.
+`LoadAssetAsync<GameObject>` sans MelonLoader ni nom obfusqué. L’ABI v7 ajoute
+le test d’assignabilité des classes, une conversion UTF-8 sûre des chaînes
+IL2CPP et l’invocation virtuelle explicite, indispensables à l’analyse
+générique de l’UI Toolkit. Les anciennes tables v1 à v6 restent prises en
+charge.
 
 ## Développer un mod en Rust
 

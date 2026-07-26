@@ -37,6 +37,12 @@ try {
         (Join-Path $root "target\$profileDirectory\dofus_native_tactical.dll") `
         (Join-Path $mods "DofusNativeTactical.dll")
     Copy-Item -Force `
+        (Join-Path $root "target\$profileDirectory\dofus_native_runtime_inspector.dll") `
+        (Join-Path $mods "DofusRuntimeInspector.dll")
+    Copy-Item -Force `
+        (Join-Path $root "target\$profileDirectory\dofus_native_interface_analyzer.dll") `
+        (Join-Path $mods "DofusInterfaceAnalyzer.dll")
+    Copy-Item -Force `
         (Join-Path $root "include\dofus_native_mod_api.h") `
         (Join-Path $dist "dofus_native_mod_api.h")
 

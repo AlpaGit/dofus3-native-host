@@ -83,6 +83,18 @@ void* dnh_unity_inflate_generic_method(
     void* method_handle,
     void* const* type_arguments,
     std::size_t type_argument_count);
+bool dnh_unity_class_is_assignable_from(
+    void* base_class,
+    void* candidate_class);
+std::size_t dnh_unity_copy_string_utf8(
+    void* string_object,
+    std::uint8_t* output,
+    std::size_t capacity);
+void* dnh_unity_runtime_invoke_virtual(
+    void* method_handle,
+    void* object,
+    void* const* arguments,
+    void** exception);
 std::size_t dnh_unity_find_fields_by_signature(
     void* class_handle,
     const DnhFieldSignatureV3* signature,

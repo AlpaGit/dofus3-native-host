@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -926,6 +927,107 @@ extern "C" void* dnh_unity_inflate_generic_method(
     resolved->function = *static_cast<void**>(inflated);
     g_dynamic_methods.push_back(resolved);
     return resolved;
+}
+
+extern "C" bool dnh_unity_class_is_assignable_from(
+    void* base_class,
+    void* candidate_class) {
+    if (base_class == nullptr || candidate_class == nullptr ||
+        !dnh_unity_is_ready()) {
+        return false;
+    }
+    return UnityResolve::Invoke<bool>(
+        "il2cpp_class_is_assignable_from",
+        static_cast<UnityResolve::Class*>(base_class)->address,
+        static_cast<UnityResolve::Class*>(candidate_class)->address);
+}
+
+extern "C" std::size_t dnh_unity_copy_string_utf8(
+    void* string_object,
+    std::uint8_t* output,
+    const std::size_t capacity) {
+    if (string_object == nullptr || !dnh_unity_is_ready()) {
+        return 0;
+    }
+    const auto length = UnityResolve::Invoke<std::int32_t>(
+        "il2cpp_string_length",
+        string_object);
+    const auto* characters = UnityResolve::Invoke<const char16_t*>(
+        "il2cpp_string_chars",
+        string_object);
+    if (length <= 0 || characters == nullptr) {
+        return 0;
+    }
+
+    std::string utf8;
+    utf8.reserve(static_cast<std::size_t>(length));
+    for (std::int32_t index = 0; index < length; ++index) {
+        std::uint32_t code_point = characters[index];
+        if (code_point >= 0xD800u && code_point <= 0xDBFFu &&
+            index + 1 < length) {
+            const std::uint32_t low = characters[index + 1];
+            if (low >= 0xDC00u && low <= 0xDFFFu) {
+                code_point =
+                    0x10000u + ((code_point - 0xD800u) << 10u) +
+                    (low - 0xDC00u);
+                ++index;
+            }
+        }
+        if (code_point >= 0xD800u && code_point <= 0xDFFFu) {
+            code_point = 0xFFFDu;
+        }
+        if (code_point <= 0x7Fu) {
+            utf8.push_back(static_cast<char>(code_point));
+        } else if (code_point <= 0x7FFu) {
+            utf8.push_back(static_cast<char>(0xC0u | (code_point >> 6u)));
+            utf8.push_back(static_cast<char>(0x80u | (code_point & 0x3Fu)));
+        } else if (code_point <= 0xFFFFu) {
+            utf8.push_back(static_cast<char>(0xE0u | (code_point >> 12u)));
+            utf8.push_back(
+                static_cast<char>(0x80u | ((code_point >> 6u) & 0x3Fu)));
+            utf8.push_back(static_cast<char>(0x80u | (code_point & 0x3Fu)));
+        } else {
+            utf8.push_back(static_cast<char>(0xF0u | (code_point >> 18u)));
+            utf8.push_back(
+                static_cast<char>(0x80u | ((code_point >> 12u) & 0x3Fu)));
+            utf8.push_back(
+                static_cast<char>(0x80u | ((code_point >> 6u) & 0x3Fu)));
+            utf8.push_back(static_cast<char>(0x80u | (code_point & 0x3Fu)));
+        }
+    }
+    if (output != nullptr && capacity != 0) {
+        const std::size_t count = std::min(capacity, utf8.size());
+        std::memcpy(output, utf8.data(), count);
+    }
+    return utf8.size();
+}
+
+extern "C" void* dnh_unity_runtime_invoke_virtual(
+    void* method_handle,
+    void* object,
+    void* const* arguments,
+    void** exception) {
+    if (method_handle == nullptr || object == nullptr ||
+        !dnh_unity_is_ready()) {
+        return nullptr;
+    }
+    const auto* method = static_cast<UnityResolve::Method*>(method_handle);
+    void* virtual_method = UnityResolve::Invoke<void*>(
+        "il2cpp_object_get_virtual_method",
+        object,
+        method->address);
+    if (virtual_method == nullptr) {
+        return nullptr;
+    }
+    void* local_exception = nullptr;
+    void** exception_output =
+        exception == nullptr ? &local_exception : exception;
+    return UnityResolve::Invoke<void*>(
+        "il2cpp_runtime_invoke",
+        virtual_method,
+        object,
+        const_cast<void**>(arguments),
+        exception_output);
 }
 
 extern "C" std::size_t dnh_unity_find_fields_by_signature(
