@@ -1,5 +1,5 @@
 use dofus_native_mod_api::{
-    DNH_ABI_VERSION_7, DNH_ERROR, DNH_MEMBER_STORAGE_STATIC, DNH_OK, DnhGcHandleV4, DnhHandle,
+    DNH_ABI_VERSION_8, DNH_ERROR, DNH_MEMBER_STORAGE_STATIC, DNH_OK, DnhGcHandleV4, DnhHandle,
     DnhHostApiV1, DnhLogLevel, DnhModInfoV1,
 };
 use dofus_native_mod_sdk::Runtime;
@@ -188,14 +188,14 @@ static FONT_HOOK_ORIGINAL: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(null_mut
 
 static MOD_ID: &[u8] = b"bubble.dofus3.interface-analyzer\0";
 static MOD_NAME: &[u8] = b"Dofus Interface Analyzer\0";
-static MOD_VERSION: &[u8] = b"2.0.1\0";
+static MOD_VERSION: &[u8] = b"2.0.2\0";
 static MOD_AUTHOR: &[u8] = b"Bubble\0";
 
 struct SyncModInfo(DnhModInfoV1);
 unsafe impl Sync for SyncModInfo {}
 
 static MOD_INFO: SyncModInfo = SyncModInfo(DnhModInfoV1 {
-    abi_version: DNH_ABI_VERSION_7,
+    abi_version: DNH_ABI_VERSION_8,
     struct_size: size_of::<DnhModInfoV1>() as u32,
     id: MOD_ID.as_ptr().cast::<c_char>(),
     name: MOD_NAME.as_ptr().cast::<c_char>(),
@@ -1665,7 +1665,7 @@ fn cancel_ui_dump(runtime: Runtime, session: &mut UiSession) {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn DNM_Query(host_abi_version: u32) -> *const DnhModInfoV1 {
-    if host_abi_version == DNH_ABI_VERSION_7 {
+    if host_abi_version == DNH_ABI_VERSION_8 {
         &MOD_INFO.0
     } else {
         null()
@@ -1675,7 +1675,7 @@ pub extern "system" fn DNM_Query(host_abi_version: u32) -> *const DnhModInfoV1 {
 #[unsafe(no_mangle)]
 /// # Safety
 ///
-/// `host_api` must be the process-lifetime ABI v7 table supplied by the host.
+/// `host_api` must be the process-lifetime ABI v8 table supplied by the host.
 pub unsafe extern "system" fn DNM_Load(host_api: *const DnhHostApiV1) -> i32 {
     let Some(runtime) = (unsafe { Runtime::bind(host_api) }) else {
         return DNH_ERROR;
@@ -1683,7 +1683,7 @@ pub unsafe extern "system" fn DNM_Load(host_api: *const DnhHostApiV1) -> i32 {
     if runtime.v7().is_none() || runtime.v5_hooks().is_none() {
         runtime.log(
             DnhLogLevel::Error,
-            "Dofus Interface Analyzer requiert l'ABI v7.",
+            "Dofus Interface Analyzer requiert l'ABI v8.",
         );
         return DNH_ERROR;
     }

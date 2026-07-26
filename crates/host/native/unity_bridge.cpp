@@ -905,10 +905,18 @@ extern "C" void* dnh_unity_inflate_generic_method(
 
     void* arguments[]{type_array};
     void* exception = nullptr;
-    void* inflated_reflection = dnh_unity_runtime_invoke(
-        make_generic_method,
+    void* concrete_make_generic_method = UnityResolve::Invoke<void*>(
+        "il2cpp_object_get_virtual_method",
         reflection_method,
-        arguments,
+        static_cast<UnityResolve::Method*>(make_generic_method)->address);
+    if (concrete_make_generic_method == nullptr) {
+        return nullptr;
+    }
+    void* inflated_reflection = UnityResolve::Invoke<void*>(
+        "il2cpp_runtime_invoke",
+        concrete_make_generic_method,
+        reflection_method,
+        static_cast<void*>(arguments),
         &exception);
     if (inflated_reflection == nullptr || exception != nullptr) {
         return nullptr;

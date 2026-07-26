@@ -1,5 +1,5 @@
 use dofus_native_mod_api::{
-    DNH_ABI_VERSION_6, DNH_ERROR, DNH_MEMBER_STORAGE_INSTANCE, DNH_MEMBER_STORAGE_STATIC, DNH_OK,
+    DNH_ABI_VERSION_8, DNH_ERROR, DNH_MEMBER_STORAGE_INSTANCE, DNH_MEMBER_STORAGE_STATIC, DNH_OK,
     DnhClassSignatureV3, DnhFieldSignatureV3, DnhGcHandleV4, DnhHandle, DnhHostApiV1, DnhLogLevel,
     DnhMethodInfoV2, DnhMethodSignatureV3, DnhModInfoV1,
 };
@@ -16,7 +16,7 @@ const HALF_CELL_WIDTH: f32 = 43.0;
 const HALF_CELL_HEIGHT: f32 = 21.5;
 const ORIGIN_X: f32 = -580.5;
 const ORIGIN_Y: f32 = 483.75;
-const CELLS_BUILT_PER_TICK: usize = 28;
+const CELLS_BUILT_PER_TICK: usize = MAP_CELL_COUNT;
 const VK_F8: i32 = 0x77;
 const METHOD_ATTRIBUTE_SPECIAL_NAME: u32 = 0x0800;
 
@@ -85,7 +85,7 @@ struct Bindings {
     tactical_set_cell_id: DnhHandle,
     tactical_apply_kind: DnhHandle,
     tactical_sprite_fields: Vec<DnhHandle>,
-    addressable_load: DnhHandle,
+    addressable_load: Option<DnhHandle>,
     addressable_release: Option<DnhHandle>,
 }
 
@@ -104,6 +104,7 @@ struct State {
     map_renderer_gc: DnhGcHandleV4,
     overlay_root_gc: DnhGcHandleV4,
     prefab_gc: DnhGcHandleV4,
+    prefab_is_addressable: bool,
     load_task_gc: DnhGcHandleV4,
     build: Option<BuildProgress>,
     suppressed: Vec<SuppressedRenderer>,
@@ -195,7 +196,7 @@ fn resolve_tactical_class(runtime: Runtime) -> Option<DnhHandle> {
         struct_size: size_of::<DnhClassSignatureV3>() as u32,
         name: null(),
         namespace_name: null(),
-        parent_name: c"MonoBehaviour".as_ptr(),
+        parent_name: null(),
         required_fields: &sprite_field,
         required_field_count: 1,
         required_methods: &int_setter,
@@ -217,10 +218,37 @@ fn resolve_tactical_class(runtime: Runtime) -> Option<DnhHandle> {
             );
         }
     }
-    classes.into_iter().find(|class| {
-        runtime.fields_by_type(*class, c"UnityEngine.Sprite").len() >= 2
-            && resolve_tactical_methods(runtime, *class).is_some()
-    })
+    runtime.log(
+        DnhLogLevel::Info,
+        &format!(
+            "Native Tactical resolver: {count} Core class candidate(s) expose Sprite fields and a void(int) method."
+        ),
+    );
+    let matches = classes
+        .into_iter()
+        .filter(|class| {
+            let sprite_count = runtime.fields_by_type(*class, c"UnityEngine.Sprite").len();
+            let methods_resolved = resolve_tactical_methods(runtime, *class).is_some();
+            runtime.log(
+                DnhLogLevel::Info,
+                &format!(
+                    "Native Tactical resolver candidate {}: spriteFields={sprite_count}, tacticalMethods={methods_resolved}.",
+                    runtime.class_name(*class)
+                ),
+            );
+            sprite_count >= 2 && methods_resolved
+        })
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        runtime.log(
+            DnhLogLevel::Error,
+            &format!(
+                "Native Tactical resolver expected one structural TacticalDebugCell match, found {}.",
+                matches.len()
+            ),
+        );
+    }
+    matches.first().copied()
 }
 
 fn resolve_tactical_methods(runtime: Runtime, class: DnhHandle) -> Option<(DnhHandle, DnhHandle)> {
@@ -309,6 +337,29 @@ fn resolve_bindings(runtime: Runtime) -> Option<Bindings> {
             "A required Unity or Dofus class was not resolved.",
         );
         return None;
+    }
+
+    let mut map_class = map_renderer_class;
+    for _ in 0..12 {
+        if map_class.is_null() {
+            break;
+        }
+        runtime.log(
+            DnhLogLevel::Info,
+            &format!(
+                "Native Tactical MapRenderer hierarchy {}: int64={}, int32={}, metadata={}, gameObjects={}.",
+                runtime.class_name(map_class),
+                runtime.fields_by_type(map_class, c"System.Int64").len(),
+                runtime.fields_by_type(map_class, c"System.Int32").len(),
+                runtime
+                    .fields_by_type(map_class, c"Core.World.Metadata.Maps.MapMetadata")
+                    .len(),
+                runtime
+                    .fields_by_type(map_class, c"UnityEngine.GameObject")
+                    .len(),
+            ),
+        );
+        map_class = runtime.class_parent(map_class);
     }
 
     let map_id_fields = runtime.fields_by_type(map_renderer_class, c"System.Int64");
@@ -400,8 +451,43 @@ fn resolve_bindings(runtime: Runtime) -> Option<Bindings> {
         c"set_sprite",
         &[c"UnityEngine.Sprite"],
     ))?;
-    let (tactical_set_cell_id, tactical_apply_kind) =
-        resolve_tactical_methods(runtime, tactical_cell_class)?;
+    runtime.log(
+        DnhLogLevel::Info,
+        "Native Tactical: Unity object/transform/renderer bindings resolved.",
+    );
+    let Some((tactical_set_cell_id, tactical_apply_kind)) =
+        resolve_tactical_methods(runtime, tactical_cell_class)
+    else {
+        runtime.log(
+            DnhLogLevel::Error,
+            &format!(
+                "Native Tactical could not resolve the cell methods on {}.",
+                runtime.class_name(tactical_cell_class)
+            ),
+        );
+        for method in declared_methods(runtime, tactical_cell_class) {
+            let Some(info) = method_info(runtime, method) else {
+                continue;
+            };
+            let parameters = (0..info.parameter_count)
+                .map(|index| {
+                    text(unsafe { (runtime.v2().method_parameter_type_name)(method, index) })
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            runtime.log(
+                DnhLogLevel::Info,
+                &format!(
+                    "Native Tactical cell method {}({parameters}) -> {}, static={}, flags=0x{:x}.",
+                    text(info.name),
+                    text(info.return_type_name),
+                    info.is_static,
+                    info.flags
+                ),
+            );
+        }
+        return None;
+    };
     let tactical_sprite_fields = runtime.fields_by_type(tactical_cell_class, c"UnityEngine.Sprite");
     if tactical_sprite_fields.len() < 2 {
         runtime.log(
@@ -410,6 +496,13 @@ fn resolve_bindings(runtime: Runtime) -> Option<Bindings> {
         );
         return None;
     }
+    runtime.log(
+        DnhLogLevel::Info,
+        &format!(
+            "Native Tactical: cell methods and {} Sprite field(s) resolved.",
+            tactical_sprite_fields.len()
+        ),
+    );
 
     let load_generic = required(runtime.method(
         addressable_class,
@@ -417,8 +510,18 @@ fn resolve_bindings(runtime: Runtime) -> Option<Bindings> {
         &[c"System.String", c"System.Int32"],
         DNH_MEMBER_STORAGE_STATIC,
     ))?;
+    runtime.log(
+        DnhLogLevel::Info,
+        "Native Tactical: generic AddressableUtility.LoadAssetAsync method resolved.",
+    );
     let addressable_load =
-        required(runtime.inflate_generic_method(load_generic, &[game_object_class]))?;
+        required(runtime.inflate_generic_method(load_generic, &[game_object_class]));
+    if addressable_load.is_none() {
+        runtime.log(
+            DnhLogLevel::Warn,
+            "Native Tactical: LoadAssetAsync<GameObject> inflation is unavailable; loaded TacticalDebugCell objects will be used instead.",
+        );
+    }
     let addressable_release =
         resolve_generic_release(runtime, addressable_class, game_object_class);
 
@@ -1083,12 +1186,42 @@ fn start_prefab_load(state: &mut State) -> bool {
     if state.prefab_gc != 0 || state.load_task_gc != 0 {
         return true;
     }
+    for tactical_cell in state
+        .runtime
+        .find_objects(state.bindings.tactical_cell_class)
+    {
+        let game_object = state
+            .runtime
+            .invoke(state.bindings.component_get_game_object, tactical_cell, &[])
+            .unwrap_or(null_mut());
+        if game_object.is_null() {
+            continue;
+        }
+        let prefab_gc = state.runtime.gc_new(game_object, false);
+        if prefab_gc == 0 {
+            continue;
+        }
+        state.prefab_gc = prefab_gc;
+        state.prefab_is_addressable = false;
+        state.runtime.log(
+            DnhLogLevel::Info,
+            "Reusing a TacticalDebugCell GameObject already loaded by the game.",
+        );
+        return true;
+    }
+    let Some(addressable_load) = state.bindings.addressable_load else {
+        state.runtime.log(
+            DnhLogLevel::Error,
+            "No loaded TacticalDebugCell object or usable Addressables loader is available.",
+        );
+        return false;
+    };
     let address = state.runtime.string("tacticalCell");
     let index_choice = 0_i32;
     let task = state
         .runtime
         .invoke(
-            state.bindings.addressable_load,
+            addressable_load,
             null_mut(),
             &[address, argument(&index_choice)],
         )
@@ -1159,6 +1292,7 @@ fn poll_prefab_load(state: &mut State) {
     if state.prefab_gc == 0 {
         return;
     }
+    state.prefab_is_addressable = true;
     state.runtime.log(
         DnhLogLevel::Info,
         "Native tacticalCell prefab loaded; its serialized sprites will be reused directly.",
@@ -1200,12 +1334,14 @@ fn toggle(state: &mut State) {
             .log(DnhLogLevel::Info, "Native tactical mode disabled.");
     } else {
         state.enabled = true;
-        enable_current_map(state, true);
+        if !enable_current_map(state, true) {
+            state.enabled = false;
+        }
     }
 }
 
 fn follow_map_changes(state: &mut State) {
-    if !state.enabled || !state.tick_count.is_multiple_of(30) {
+    if !state.enabled {
         return;
     }
     let renderer = state.runtime.gc_target(state.map_renderer_gc);
@@ -1241,25 +1377,27 @@ fn release_prefab(state: &mut State) {
         return;
     }
     let prefab = state.runtime.gc_target(state.prefab_gc);
-    if !prefab.is_null()
+    if state.prefab_is_addressable
+        && !prefab.is_null()
         && let Some(release) = state.bindings.addressable_release
     {
         state.runtime.invoke(release, null_mut(), &[prefab]);
     }
     state.runtime.gc_free(state.prefab_gc);
     state.prefab_gc = 0;
+    state.prefab_is_addressable = false;
 }
 
 static MOD_ID: &[u8] = b"bubble.dofus3.native-tactical\0";
 static MOD_NAME: &[u8] = b"Dofus 3 Native Tactical\0";
-static MOD_VERSION: &[u8] = b"5.0.0\0";
+static MOD_VERSION: &[u8] = b"5.0.2\0";
 static MOD_AUTHOR: &[u8] = b"Bubble\0";
 
 struct SyncModInfo(DnhModInfoV1);
 unsafe impl Sync for SyncModInfo {}
 
 static MOD_INFO: SyncModInfo = SyncModInfo(DnhModInfoV1 {
-    abi_version: DNH_ABI_VERSION_6,
+    abi_version: DNH_ABI_VERSION_8,
     struct_size: size_of::<DnhModInfoV1>() as u32,
     id: MOD_ID.as_ptr().cast::<c_char>(),
     name: MOD_NAME.as_ptr().cast::<c_char>(),
@@ -1274,7 +1412,7 @@ unsafe extern "system" {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn DNM_Query(host_abi_version: u32) -> *const DnhModInfoV1 {
-    if host_abi_version == DNH_ABI_VERSION_6 {
+    if host_abi_version == DNH_ABI_VERSION_8 {
         &MOD_INFO.0
     } else {
         null()
@@ -1284,9 +1422,28 @@ pub extern "system" fn DNM_Query(host_abi_version: u32) -> *const DnhModInfoV1 {
 #[unsafe(no_mangle)]
 /// # Safety
 ///
-/// `host_api` must be the process-lifetime ABI v6 table supplied by the host.
+/// `host_api` must be the process-lifetime ABI v8 table supplied by the host.
 pub unsafe extern "system" fn DNM_Load(host_api: *const DnhHostApiV1) -> i32 {
+    if host_api.is_null() {
+        return DNH_ERROR;
+    }
+    let entry_message = b"Native Tactical: DNM_Load entered.";
+    unsafe {
+        ((*host_api).log)(
+            DnhLogLevel::Info,
+            entry_message.as_ptr(),
+            entry_message.len(),
+        );
+    }
     let Some(runtime) = (unsafe { Runtime::bind(host_api) }) else {
+        let error_message = b"Native Tactical: Runtime rejected the negotiated host ABI.";
+        unsafe {
+            ((*host_api).log)(
+                DnhLogLevel::Error,
+                error_message.as_ptr(),
+                error_message.len(),
+            );
+        }
         return DNH_ERROR;
     };
     let Some(bindings) = resolve_bindings(runtime) else {
@@ -1306,13 +1463,14 @@ pub unsafe extern "system" fn DNM_Load(host_api: *const DnhHostApiV1) -> i32 {
         map_renderer_gc: 0,
         overlay_root_gc: 0,
         prefab_gc: 0,
+        prefab_is_addressable: false,
         load_task_gc: 0,
         build: None,
         suppressed: Vec::new(),
     });
     runtime.log(
         DnhLogLevel::Info,
-        "Ready. Press F8 to toggle native tactical mode (Rust SDK, native sprites, ABI v6).",
+        "Ready. Press F8 to toggle native tactical mode (Rust SDK, native sprites, ABI v8).",
     );
     DNH_OK
 }
