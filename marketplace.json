@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-07-26T02:54:08.4290455Z",
+  "updatedAt": "2026-07-26T02:58:22.3302230+00:00",
   "mods": [
     {
       "id": "bubble.dofus3.native-tactical",
@@ -11,7 +11,7 @@
       "abiVersion": 6,
       "fileName": "DofusNativeTactical.dll",
       "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.3.1/DofusNativeTactical.dll",
-      "sha256": "8037da6a780f2b4543b569500644ae3bb21a3c48dfc0ac80c6bb5ebb8b41864d",
+      "sha256": "1301dbc57d96a0d966adb6f43d557db73dd1fe6fa3d87e8f47beefb9e93f7fd2",
       "homepage": "https://github.com/AlpaGit/dofus3-native-host"
     },
     {
@@ -23,7 +23,7 @@
       "abiVersion": 5,
       "fileName": "DofusNetworkDumper.dll",
       "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.3.1/DofusNetworkDumper.dll",
-      "sha256": "7fdfc7285e50fc00cdb8a67ec8fbedf801144a94c1a22eb8086cf8ec41e69e2b",
+      "sha256": "f130d9806f78a2fb8d5271b94b0f37a1cd2a8dd5c2df14f4559e39dab29146be",
       "homepage": "https://github.com/AlpaGit/dofus3-native-host"
     },
     {
@@ -35,7 +35,7 @@
       "abiVersion": 6,
       "fileName": "DofusRuntimeInspector.dll",
       "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.3.1/DofusRuntimeInspector.dll",
-      "sha256": "dc251c4406cfd2d8896df2fdf81b103d159892c5776596bf645795bd1fb1d097",
+      "sha256": "3d3fe5f4aa915b3d05123b4039913ca897e3483a789d3533ffb8f63f06bddd7e",
       "homepage": "https://github.com/AlpaGit/dofus3-native-host"
     },
     {
@@ -47,7 +47,7 @@
       "abiVersion": 7,
       "fileName": "DofusInterfaceAnalyzer.dll",
       "downloadUrl": "https://github.com/AlpaGit/dofus3-native-host/releases/download/v0.3.1/DofusInterfaceAnalyzer.dll",
-      "sha256": "be4da896891132f8f8bcc2f923172d6f0dcdde56a50e8dfc1c85aedf3c821ed5",
+      "sha256": "bc9c6b813526d039e6d833a2fcdda20788c71004a27b075207f261526fe64499",
       "homepage": "https://github.com/AlpaGit/dofus3-native-host"
     }
   ]
