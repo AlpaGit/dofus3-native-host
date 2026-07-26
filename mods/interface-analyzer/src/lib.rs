@@ -81,6 +81,7 @@ struct Bindings {
     uidocument_get_panel_settings: DnhHandle,
     visual_get_name: DnhHandle,
     visual_get_tooltip: DnhHandle,
+    visual_get_child_count: DnhHandle,
     visual_get_hierarchy: DnhHandle,
     visual_get_resolved_style: DnhHandle,
     text_get_text: DnhHandle,
@@ -136,17 +137,30 @@ struct NodeJob {
     depth: usize,
     parent_path: String,
     sibling_index: i32,
+    inside_popup: bool,
+    legacy_header: Option<String>,
+}
+
+struct PendingNode {
+    element: DnhHandle,
+    depth: usize,
+    parent_path: String,
+    sibling_index: i32,
+    inside_popup: bool,
+    legacy_header: Option<String>,
 }
 
 struct UiSession {
     sequence: u64,
     verbose: bool,
-    queue: VecDeque<NodeJob>,
+    queue: Vec<NodeJob>,
     visited: BTreeSet<usize>,
+    legacy: BufWriter<File>,
     tree: BufWriter<File>,
     texts: BufWriter<File>,
     total_nodes: usize,
     text_nodes: usize,
+    skipped_hidden: usize,
     truncated: bool,
 }
 
@@ -154,6 +168,7 @@ struct State {
     runtime: Runtime,
     bindings: Bindings,
     root: PathBuf,
+    legacy_path: PathBuf,
     resolution_writer: BufWriter<File>,
     ui_session: Option<UiSession>,
     sequence: u64,
@@ -173,7 +188,7 @@ static FONT_HOOK_ORIGINAL: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(null_mut
 
 static MOD_ID: &[u8] = b"bubble.dofus3.interface-analyzer\0";
 static MOD_NAME: &[u8] = b"Dofus Interface Analyzer\0";
-static MOD_VERSION: &[u8] = b"2.0.0\0";
+static MOD_VERSION: &[u8] = b"2.0.1\0";
 static MOD_AUTHOR: &[u8] = b"Bubble\0";
 
 struct SyncModInfo(DnhModInfoV1);
@@ -193,6 +208,24 @@ type FontResolverFn = unsafe extern "system" fn(DnhHandle, DnhHandle, DnhHandle)
 #[link(name = "user32")]
 unsafe extern "system" {
     fn GetAsyncKeyState(virtual_key: i32) -> i16;
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct LocalSystemTime {
+    year: u16,
+    month: u16,
+    day_of_week: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+    milliseconds: u16,
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetLocalTime(system_time: *mut LocalSystemTime);
 }
 
 fn state() -> MutexGuard<'static, Option<State>> {
@@ -340,6 +373,11 @@ fn resolve_bindings(runtime: Runtime) -> Option<Bindings> {
         visual_get_tooltip: required(runtime.instance_method(
             visual_element_class,
             c"get_tooltip",
+            &[],
+        ))?,
+        visual_get_child_count: required(runtime.instance_method(
+            visual_element_class,
+            c"get_childCount",
             &[],
         ))?,
         visual_get_hierarchy: required(runtime.instance_method(
@@ -639,6 +677,15 @@ fn writer(path: &Path) -> Result<BufWriter<File>, String> {
         .map_err(|error| format!("création de {} impossible : {error}", path.display()))
 }
 
+fn append_writer(path: &Path) -> Result<BufWriter<File>, String> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map(BufWriter::new)
+        .map_err(|error| format!("ouverture de {} impossible : {error}", path.display()))
+}
+
 fn dump_font_inventory(
     runtime: Runtime,
     bindings: Bindings,
@@ -666,6 +713,376 @@ fn dump_font_inventory(
 
 fn csv(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn legacy_timestamp() -> String {
+    let mut value = LocalSystemTime::default();
+    unsafe { GetLocalTime(&mut value) };
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        value.hour, value.minute, value.second, value.milliseconds
+    )
+}
+
+fn legacy_log(writer: &mut BufWriter<File>, line: &str) {
+    let _ = writeln!(writer, "[{}] {line}", legacy_timestamp());
+}
+
+fn legacy_text(value: &str, maximum_characters: usize) -> String {
+    let escaped = value.replace('\r', "").replace('\n', "\\n");
+    if escaped.chars().count() <= maximum_characters {
+        return escaped;
+    }
+    let mut truncated = escaped.chars().take(maximum_characters).collect::<String>();
+    truncated.push('…');
+    truncated
+}
+
+fn short_type_name(type_name: &str) -> &str {
+    type_name.rsplit('.').next().unwrap_or(type_name)
+}
+
+fn style_float_value(style: &Value, name: &str) -> Option<f64> {
+    style.get(name).and_then(Value::as_f64)
+}
+
+fn style_int_value(style: &Value, name: &str) -> Option<i64> {
+    style.get(name).and_then(Value::as_i64)
+}
+
+fn compact_float(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_positive() {
+            "+Inf".to_owned()
+        } else {
+            "-Inf".to_owned()
+        };
+    }
+    let rounded = value.round();
+    if (value - rounded).abs() < 0.0005 {
+        return format!("{}", rounded as i64);
+    }
+    let formatted = format!("{value:.2}");
+    formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned()
+}
+
+fn color_hex(value: &Value) -> Option<String> {
+    let channel = |name: &str| {
+        value
+            .get(name)
+            .and_then(Value::as_f64)
+            .map(|channel| (channel * 255.0).round().clamp(0.0, 255.0) as u8)
+    };
+    let (r, g, b, a) = (channel("r")?, channel("g")?, channel("b")?, channel("a")?);
+    if a == 255 {
+        Some(format!("#{r:02X}{g:02X}{b:02X}"))
+    } else {
+        Some(format!("#{r:02X}{g:02X}{b:02X}{a:02X}"))
+    }
+}
+
+fn display_name(value: i64) -> String {
+    match value {
+        0 => "Flex".to_owned(),
+        1 => "None".to_owned(),
+        _ => value.to_string(),
+    }
+}
+
+fn visibility_name(value: i64) -> String {
+    match value {
+        0 => "Visible".to_owned(),
+        1 => "Hidden".to_owned(),
+        _ => value.to_string(),
+    }
+}
+
+fn position_name(value: i64) -> String {
+    match value {
+        0 => "Relative".to_owned(),
+        1 => "Absolute".to_owned(),
+        _ => value.to_string(),
+    }
+}
+
+fn flex_direction_name(value: i64) -> String {
+    match value {
+        0 => "Column".to_owned(),
+        1 => "ColumnReverse".to_owned(),
+        2 => "Row".to_owned(),
+        3 => "RowReverse".to_owned(),
+        _ => value.to_string(),
+    }
+}
+
+fn flex_wrap_name(value: i64) -> String {
+    match value {
+        0 => "NoWrap".to_owned(),
+        1 => "Wrap".to_owned(),
+        2 => "WrapReverse".to_owned(),
+        _ => value.to_string(),
+    }
+}
+
+fn align_name(value: i64) -> String {
+    match value {
+        0 => "Auto".to_owned(),
+        1 => "FlexStart".to_owned(),
+        2 => "Center".to_owned(),
+        3 => "FlexEnd".to_owned(),
+        4 => "Stretch".to_owned(),
+        _ => value.to_string(),
+    }
+}
+
+fn justify_name(value: i64) -> String {
+    match value {
+        0 => "FlexStart".to_owned(),
+        1 => "Center".to_owned(),
+        2 => "FlexEnd".to_owned(),
+        3 => "SpaceBetween".to_owned(),
+        4 => "SpaceAround".to_owned(),
+        _ => value.to_string(),
+    }
+}
+
+fn font_weight_name(value: i64) -> String {
+    match value {
+        0 => "Normal".to_owned(),
+        1 => "Bold".to_owned(),
+        2 => "Italic".to_owned(),
+        3 => "BoldAndItalic".to_owned(),
+        _ => value.to_string(),
+    }
+}
+
+fn legacy_layout(style: &Value) -> Vec<String> {
+    let mut parts = Vec::new();
+    if let Some(value) = style_int_value(style, "display").filter(|value| *value != 0) {
+        parts.push(format!("display={}", display_name(value)));
+    }
+    if let Some(value) = style_int_value(style, "visibility").filter(|value| *value != 0) {
+        parts.push(format!("vis={}", visibility_name(value)));
+    }
+    if let Some(value) = style_float_value(style, "opacity").filter(|value| *value < 0.999) {
+        parts.push(format!("op={}", compact_float(value)));
+    }
+    if let Some(value) = style_int_value(style, "position").filter(|value| *value != 0) {
+        parts.push(format!("pos={}", position_name(value)));
+    }
+    for (key, label) in [
+        ("top", "top"),
+        ("right", "right"),
+        ("bottom", "bottom"),
+        ("left", "left"),
+    ] {
+        if let Some(value) =
+            style_float_value(style, key).filter(|value| value.is_finite() && *value != 0.0)
+        {
+            parts.push(format!("{label}={}", compact_float(value)));
+        }
+    }
+    for (label, keys) in [
+        (
+            "pad",
+            ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"],
+        ),
+        (
+            "mar",
+            ["marginTop", "marginRight", "marginBottom", "marginLeft"],
+        ),
+    ] {
+        let values = keys.map(|key| style_float_value(style, key).unwrap_or(0.0));
+        if values.iter().any(|value| *value != 0.0) {
+            parts.push(format!(
+                "{label}={},{},{},{}",
+                compact_float(values[0]),
+                compact_float(values[1]),
+                compact_float(values[2]),
+                compact_float(values[3])
+            ));
+        }
+    }
+    if let Some(value) = style_int_value(style, "flexDirection").filter(|value| *value != 0) {
+        parts.push(format!("flexDir={}", flex_direction_name(value)));
+    }
+    if let Some(value) = style_int_value(style, "flexWrap").filter(|value| *value != 0) {
+        parts.push(format!("flexWrap={}", flex_wrap_name(value)));
+    }
+    if let Some(value) = style_float_value(style, "flexGrow").filter(|value| *value > 0.0) {
+        parts.push(format!("grow={}", compact_float(value)));
+    }
+    if let Some(value) =
+        style_float_value(style, "flexShrink").filter(|value| (*value - 1.0).abs() > 0.0001)
+    {
+        parts.push(format!("shrink={}", compact_float(value)));
+    }
+    if let Some(value) = style_int_value(style, "alignItems").filter(|value| *value != 4) {
+        parts.push(format!("alignItems={}", align_name(value)));
+    }
+    if let Some(value) = style_int_value(style, "alignSelf").filter(|value| *value != 0) {
+        parts.push(format!("alignSelf={}", align_name(value)));
+    }
+    if let Some(value) = style_int_value(style, "justifyContent").filter(|value| *value != 0) {
+        parts.push(format!("justify={}", justify_name(value)));
+    }
+    parts
+}
+
+fn custom_string<'a>(custom: &'a Value, name: &str) -> Option<&'a str> {
+    custom.get(name).and_then(Value::as_str)
+}
+
+fn push_quoted_detail(parts: &mut Vec<String>, custom: &Value, property: &str, label: &str) {
+    if let Some(value) = custom_string(custom, property).filter(|value| !value.is_empty()) {
+        parts.push(format!("{label}=\"{}\"", legacy_text(value, 500)));
+    }
+}
+
+fn legacy_custom_details(type_name: &str, custom: &Value) -> Vec<String> {
+    let mut parts = Vec::new();
+    match type_name {
+        "WindowFigma" => {
+            push_quoted_detail(&mut parts, custom, "title", "title");
+            push_quoted_detail(&mut parts, custom, "subtitle", "subtitle");
+            push_quoted_detail(&mut parts, custom, "imgUrl", "imgUrl");
+            for (property, label) in [
+                ("isModal", "isModal"),
+                ("showCloseButton", "hasClose"),
+                ("hideTitleBar", "hideTitleBar"),
+                ("isMovable", "isMovable"),
+            ] {
+                if custom.get(property).and_then(Value::as_bool) == Some(true) {
+                    parts.push(label.to_owned());
+                }
+            }
+            if let Some(value) = custom.get("headerStyle").and_then(Value::as_i64) {
+                parts.push(format!("headerStyle={value}"));
+            }
+        }
+        "DofusButtonCustom" => {
+            push_quoted_detail(&mut parts, custom, "text", "text");
+            for (property, label) in [
+                ("mainStyle", "main"),
+                ("status", "status"),
+                ("size", "size"),
+            ] {
+                if let Some(value) = custom.get(property).and_then(Value::as_i64) {
+                    parts.push(format!("{label}={value}"));
+                }
+            }
+        }
+        "Dropdown" => {
+            push_quoted_detail(&mut parts, custom, "captionText", "caption");
+            push_quoted_detail(&mut parts, custom, "choiceText", "selected");
+            if let Some(value) = custom.get("dropdownType").and_then(Value::as_i64) {
+                parts.push(format!("type={value}"));
+            }
+        }
+        "DropdownButton" => {
+            push_quoted_detail(&mut parts, custom, "buttonText", "buttonText");
+            push_quoted_detail(&mut parts, custom, "buttonImageUrl", "buttonImageUrl");
+        }
+        "DofusToggleButtonGroupCustom" => {
+            if let Some(value) = custom.get("selectedIndex").and_then(Value::as_i64) {
+                parts.push(format!("selectedIdx={value}"));
+            }
+        }
+        "DofusToggleButtonCustom" => {
+            push_quoted_detail(&mut parts, custom, "text", "text");
+            push_quoted_detail(&mut parts, custom, "imageUrl", "imageUrl");
+        }
+        _ => {}
+    }
+    parts
+}
+
+struct LegacyNode<'a> {
+    depth: usize,
+    type_name: &'a str,
+    name: &'a str,
+    tooltip: &'a str,
+    text: Option<&'a str>,
+    font_asset: Option<&'a FontAssetSummary>,
+    style: &'a Value,
+    custom: &'a Value,
+}
+
+fn legacy_node_line(node: LegacyNode<'_>) -> String {
+    let short_type = short_type_name(node.type_name);
+    let mut line = format!("  {}{short_type}", " ".repeat(node.depth * 2));
+    if !node.name.is_empty() {
+        line.push('#');
+        line.push_str(node.name);
+    }
+    if let (Some(width), Some(height)) = (
+        style_float_value(node.style, "width"),
+        style_float_value(node.style, "height"),
+    ) {
+        line.push_str(&format!(" {}x{}", width as i32, height as i32));
+    }
+    if !node.tooltip.is_empty() {
+        line.push_str(&format!(" tooltip=\"{}\"", legacy_text(node.tooltip, 200)));
+    }
+    if let Some(text) = node.text {
+        line.push_str(&format!(" text=\"{}\"", legacy_text(text, 500)));
+        if let Some(font) = node.font_asset {
+            line.push_str(&format!(" font={}/{}", font.family_name, font.style_name));
+        } else {
+            line.push_str(" font=<no font>");
+        }
+        if let Some(value) = style_float_value(node.style, "fontSize") {
+            line.push_str(&format!(" size={}px", compact_float(value)));
+        }
+        if let Some(value) = style_int_value(node.style, "fontStyleAndWeight") {
+            line.push_str(&format!(" weight={}", font_weight_name(value)));
+        }
+        if let Some(value) = node.style.get("color").and_then(color_hex) {
+            line.push_str(&format!(" color={value}"));
+        }
+        if let Some(value) = style_float_value(node.style, "letterSpacing") {
+            line.push_str(&format!(" letterSpacing={}px", compact_float(value)));
+        }
+        if let Some(value) = style_float_value(node.style, "paragraphSpacing") {
+            line.push_str(&format!(" paragraph={}px", compact_float(value)));
+        }
+        if let Some(value) =
+            style_float_value(node.style, "outlineWidth").filter(|value| *value > 0.0)
+        {
+            line.push_str(&format!(" outline={}px", compact_float(value)));
+        }
+    } else {
+        for detail in legacy_custom_details(short_type, node.custom) {
+            line.push(' ');
+            line.push_str(&detail);
+        }
+        if let Some(value) = node.style.get("backgroundColor").and_then(color_hex)
+            && node.style["backgroundColor"]["a"].as_f64().unwrap_or(0.0) > 0.0
+        {
+            line.push_str(&format!(" bg={value}"));
+        }
+        if let Some(value) =
+            style_float_value(node.style, "borderTopLeftRadius").filter(|value| *value > 0.0)
+        {
+            line.push_str(&format!(" radius={}px", compact_float(value)));
+        }
+        if let Some(value) =
+            style_float_value(node.style, "borderTopWidth").filter(|value| *value > 0.0)
+        {
+            line.push_str(&format!(" border={}px", compact_float(value)));
+        }
+    }
+    for detail in legacy_layout(node.style) {
+        line.push(' ');
+        line.push_str(&detail);
+    }
+    line
 }
 
 fn style_float(runtime: Runtime, style: DnhHandle, method: DnhHandle) -> Option<f32> {
@@ -846,31 +1263,26 @@ fn node_label(runtime: Runtime, bindings: Bindings, element: DnhHandle) -> (Stri
     (type_name, name)
 }
 
-fn enqueue_node(
-    runtime: Runtime,
-    session: &mut UiSession,
-    element: DnhHandle,
-    depth: usize,
-    parent_path: String,
-    sibling_index: i32,
-) {
-    if element.is_null()
-        || depth > MAX_DEPTH
+fn enqueue_node(runtime: Runtime, session: &mut UiSession, node: PendingNode) {
+    if node.element.is_null()
+        || node.depth > MAX_DEPTH
         || session.total_nodes + session.queue.len() >= MAX_NODES
-        || !session.visited.insert(element as usize)
+        || !session.visited.insert(node.element as usize)
     {
         if session.total_nodes + session.queue.len() >= MAX_NODES {
             session.truncated = true;
         }
         return;
     }
-    let gc_handle = runtime.gc_new(element, false);
+    let gc_handle = runtime.gc_new(node.element, false);
     if gc_handle != 0 {
-        session.queue.push_back(NodeJob {
+        session.queue.push(NodeJob {
             gc_handle,
-            depth,
-            parent_path,
-            sibling_index,
+            depth: node.depth,
+            parent_path: node.parent_path,
+            sibling_index: node.sibling_index,
+            inside_popup: node.inside_popup,
+            legacy_header: node.legacy_header,
         });
     }
 }
@@ -880,6 +1292,9 @@ fn inspect_node(runtime: Runtime, bindings: Bindings, session: &mut UiSession, j
     if element.is_null() {
         runtime.gc_free(job.gc_handle);
         return;
+    }
+    if let Some(header) = job.legacy_header.as_deref() {
+        legacy_log(&mut session.legacy, header);
     }
     let (type_name, name) = node_label(runtime, bindings, element);
     let segment = if name.is_empty() {
@@ -896,6 +1311,18 @@ fn inspect_node(runtime: Runtime, bindings: Bindings, session: &mut UiSession, j
         .invoke(bindings.visual_get_tooltip, element, &[])
         .map(|value| managed_string(runtime, value))
         .unwrap_or_default();
+    let style = style_summary(runtime, bindings, element, true);
+    let hidden = style_int_value(&style, "display") == Some(1)
+        || (!job.inside_popup
+            && style_float_value(&style, "width") == Some(0.0)
+            && style_float_value(&style, "height") == Some(0.0));
+    if hidden {
+        session.skipped_hidden += 1;
+        runtime.gc_free(job.gc_handle);
+        return;
+    }
+    let now_inside_popup =
+        job.inside_popup || short_type_name(&type_name).eq_ignore_ascii_case("WindowFigma");
     let is_text = runtime.object_is(element, bindings.text_element_class);
     let text = if is_text {
         runtime
@@ -917,8 +1344,19 @@ fn inspect_node(runtime: Runtime, bindings: Bindings, session: &mut UiSession, j
         })
         .filter(|asset| !asset.is_null())
         .map(|asset| font_asset_summary(runtime, bindings, asset));
-    let style = style_summary(runtime, bindings, element, session.verbose);
-    let custom = custom_properties(runtime, element, session.verbose);
+    let custom = custom_properties(runtime, element, true);
+    let legacy_line = legacy_node_line(LegacyNode {
+        depth: job.depth,
+        type_name: &type_name,
+        name: &name,
+        tooltip: &tooltip,
+        text: is_text.then_some(text.as_str()),
+        font_asset: font_asset.as_ref(),
+        style: &style,
+        custom: &custom,
+    });
+    legacy_log(&mut session.legacy, &legacy_line);
+    let _ = session.legacy.flush();
     let row = json!({
         "depth": job.depth,
         "path": path,
@@ -972,7 +1410,7 @@ fn inspect_node(runtime: Runtime, bindings: Bindings, session: &mut UiSession, j
             .unwrap_or(0)
             .clamp(0, 100_000)
     };
-    for index in 0..child_count {
+    for index in (0..child_count).rev() {
         let child = if hierarchy_get_item.is_null() {
             null_mut()
         } else {
@@ -984,7 +1422,18 @@ fn inspect_node(runtime: Runtime, bindings: Bindings, session: &mut UiSession, j
                 )
                 .unwrap_or(null_mut())
         };
-        enqueue_node(runtime, session, child, job.depth + 1, path.clone(), index);
+        enqueue_node(
+            runtime,
+            session,
+            PendingNode {
+                element: child,
+                depth: job.depth + 1,
+                parent_path: path.clone(),
+                sibling_index: index,
+                inside_popup: now_inside_popup,
+                legacy_header: None,
+            },
+        );
     }
     runtime.gc_free(job.gc_handle);
 }
@@ -1000,8 +1449,25 @@ fn start_ui_dump(state: &mut State, verbose: bool) {
     state.sequence = state.sequence.wrapping_add(1);
     let sequence = state.sequence;
     let mode = if verbose { "verbose" } else { "light" };
+    let hotkey = if verbose { "F12" } else { "F11" };
+    let legacy_path = state.legacy_path.clone();
     let tree_path = state.root.join(format!("ui-tree-{sequence}-{mode}.jsonl"));
     let texts_path = state.root.join(format!("texts-{sequence}-{mode}.csv"));
+    let Ok(mut legacy) = append_writer(&legacy_path) else {
+        state.runtime.log(
+            DnhLogLevel::Error,
+            "Création du log compatible DofusFontDumper impossible.",
+        );
+        return;
+    };
+    legacy_log(
+        &mut legacy,
+        if verbose {
+            "--- F12 pressed: scheduling background dump (verbose: all properties) ---"
+        } else {
+            "--- F11 pressed: scheduling background dump (lightweight) ---"
+        },
+    );
     let Ok(tree) = writer(&tree_path) else {
         state
             .runtime
@@ -1016,16 +1482,22 @@ fn start_ui_dump(state: &mut State, verbose: bool) {
     };
     let _ = writeln!(texts, "path,type,name,text,fontAsset,familyName,styleName");
     let documents = state.runtime.find_objects(state.bindings.ui_document_class);
+    legacy_log(
+        &mut legacy,
+        &format!("  Found {} UIDocument instances.", documents.len()),
+    );
     let mut panels = Vec::new();
     let mut session = UiSession {
         sequence,
         verbose,
-        queue: VecDeque::new(),
+        queue: Vec::new(),
         visited: BTreeSet::new(),
+        legacy,
         tree,
         texts,
         total_nodes: 0,
         text_nodes: 0,
+        skipped_hidden: 0,
         truncated: false,
     };
     for (index, document) in documents.into_iter().enumerate() {
@@ -1042,6 +1514,23 @@ fn start_ui_dump(state: &mut State, verbose: bool) {
             .unwrap_or(null_mut());
         let document_name = object_name(state.runtime, state.bindings, document);
         let panel_name = object_name(state.runtime, state.bindings, panel);
+        if root.is_null() {
+            legacy_log(
+                &mut session.legacy,
+                &format!("    UIDocument \"{document_name}\" has no rootVisualElement."),
+            );
+            continue;
+        }
+        let root_child_count = invoke_value::<i32>(
+            state.runtime,
+            state.bindings.visual_get_child_count,
+            root,
+            &[],
+        )
+        .unwrap_or(0);
+        let legacy_header = format!(
+            "  --- UIDocument \"{document_name}\" (panel=\"{panel_name}\") childCount={root_child_count} ---"
+        );
         panels.push(json!({
             "document": document_name,
             "panel": panel_name,
@@ -1050,12 +1539,17 @@ fn start_ui_dump(state: &mut State, verbose: bool) {
         enqueue_node(
             state.runtime,
             &mut session,
-            root,
-            0,
-            format!("UIDocument#{document_name}"),
-            index as i32,
+            PendingNode {
+                element: root,
+                depth: 0,
+                parent_path: format!("UIDocument#{document_name}"),
+                sibling_index: index as i32,
+                inside_popup: false,
+                legacy_header: Some(legacy_header),
+            },
         );
     }
+    session.queue.reverse();
     let _ = serde_json::to_vec_pretty(&json!({
         "schemaVersion": 1,
         "sequence": sequence,
@@ -1084,8 +1578,12 @@ fn start_ui_dump(state: &mut State, verbose: bool) {
         &format!(
             "Interface Analyzer: analyse {mode} démarrée, {} racine(s), sortie {}.",
             session.queue.len(),
-            tree_path.display()
+            legacy_path.display()
         ),
+    );
+    state.runtime.log(
+        DnhLogLevel::Info,
+        &format!("{hotkey}: format texte historique + JSON/CSV complémentaires."),
     );
     state.ui_session = Some(session);
 }
@@ -1095,12 +1593,20 @@ fn process_ui_dump(state: &mut State) {
         return;
     };
     for _ in 0..NODES_PER_TICK {
-        let Some(job) = session.queue.pop_front() else {
+        let Some(job) = session.queue.pop() else {
             break;
         };
         inspect_node(state.runtime, state.bindings, &mut session, job);
     }
     if session.queue.is_empty() {
+        legacy_log(
+            &mut session.legacy,
+            &format!(
+                "  --- dump complete (logged {} visible nodes, skipped {} hidden/0×0 subtrees) ---",
+                session.total_nodes, session.skipped_hidden
+            ),
+        );
+        let _ = session.legacy.flush();
         let _ = session.tree.flush();
         let _ = session.texts.flush();
         let mode = if session.verbose { "verbose" } else { "light" };
@@ -1113,6 +1619,7 @@ fn process_ui_dump(state: &mut State) {
             "mode": mode,
             "nodes": session.total_nodes,
             "textNodes": session.text_nodes,
+            "skippedHidden": session.skipped_hidden,
             "truncated": session.truncated,
             "maxNodes": MAX_NODES,
             "maxDepth": MAX_DEPTH,
@@ -1190,6 +1697,40 @@ pub unsafe extern "system" fn DNM_Load(host_api: *const DnhHostApiV1) -> i32 {
             return DNH_ERROR;
         }
     };
+    let legacy_path = match std::env::current_dir()
+        .map(|game_root| game_root.join("UserData"))
+        .map_err(|error| format!("dossier du jeu inaccessible : {error}"))
+        .and_then(|user_data| {
+            std::fs::create_dir_all(&user_data)
+                .map_err(|error| {
+                    format!("création de {} impossible : {error}", user_data.display())
+                })
+                .map(|()| user_data.join("dofus-font-dumper.log"))
+        }) {
+        Ok(path) => path,
+        Err(error) => {
+            runtime.log(DnhLogLevel::Error, &error);
+            return DNH_ERROR;
+        }
+    };
+    let mut initial_legacy_log = match File::create(&legacy_path).map(BufWriter::new) {
+        Ok(writer) => writer,
+        Err(error) => {
+            runtime.log(
+                DnhLogLevel::Error,
+                &format!("création de {} impossible : {error}", legacy_path.display()),
+            );
+            return DNH_ERROR;
+        }
+    };
+    legacy_log(
+        &mut initial_legacy_log,
+        &format!(
+            "DofusInterfaceAnalyzer online — log path: {}",
+            legacy_path.display()
+        ),
+    );
+    let _ = initial_legacy_log.flush();
     let resolution_writer = match writer(&root.join("font-resolutions.jsonl")) {
         Ok(writer) => writer,
         Err(error) => {
@@ -1203,6 +1744,7 @@ pub unsafe extern "system" fn DNM_Load(host_api: *const DnhHostApiV1) -> i32 {
          F10: inventaire live des FontAsset.\n\
          F11: arbre UI Toolkit progressif léger.\n\
          F12: arbre UI Toolkit progressif avec styles/layout étendus.\n\
+         UserData/dofus-font-dumper.log: format texte historique principal.\n\
          font-resolutions.jsonl: résolutions dynamiques Font -> FontAsset.\n\
          texts-*.csv: textes, chemins UI et polices effectivement résolues.\n",
     );
@@ -1214,6 +1756,7 @@ pub unsafe extern "system" fn DNM_Load(host_api: *const DnhHostApiV1) -> i32 {
         runtime,
         bindings,
         root: root.clone(),
+        legacy_path: legacy_path.clone(),
         resolution_writer,
         ui_session: None,
         sequence: 0,
@@ -1225,8 +1768,8 @@ pub unsafe extern "system" fn DNM_Load(host_api: *const DnhHostApiV1) -> i32 {
     runtime.log(
         DnhLogLevel::Info,
         &format!(
-            "Dofus Interface Analyzer prêt: F10 polices, F11 UI, F12 UI verbose. Sortie {}.",
-            root.display()
+            "Dofus Interface Analyzer prêt: F10 polices, F11 UI, F12 UI verbose. Log historique {}.",
+            legacy_path.display()
         ),
     );
     DNH_OK
@@ -1294,5 +1837,99 @@ pub extern "system" fn DNM_Unload() {
     }
     if let Ok(mut keys) = RESOLUTION_KEYS.lock() {
         keys.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_text_nodes_like_the_historical_dumper() {
+        let style = json!({
+            "width": 320.0,
+            "height": 40.0,
+            "display": 0,
+            "visibility": 0,
+            "opacity": 1.0,
+            "color": {"r": 1.0, "g": 0.5, "b": 0.0, "a": 1.0},
+            "fontSize": 16.0,
+            "fontStyleAndWeight": 1,
+            "letterSpacing": 0.5,
+            "paragraphSpacing": 2.0,
+            "outlineWidth": 1.0,
+            "paddingTop": 4.0,
+            "paddingRight": 8.0,
+            "paddingBottom": 4.0,
+            "paddingLeft": 8.0,
+            "flexShrink": 1.0,
+            "alignItems": 4,
+            "alignSelf": 0,
+            "justifyContent": 0
+        });
+        let font = FontAssetSummary {
+            object_name: "Dofus-Regular SDF".to_owned(),
+            family_name: "Dofus".to_owned(),
+            style_name: "Regular".to_owned(),
+            point_size: Some(90.0),
+            line_height: Some(108.0),
+            atlas_population_mode: Some(1),
+            source_font: "Dofus-Regular".to_owned(),
+            atlas_textures: Vec::new(),
+        };
+        let line = legacy_node_line(LegacyNode {
+            depth: 1,
+            type_name: "UnityEngine.UIElements.TextElement",
+            name: "title",
+            tooltip: "",
+            text: Some("Bonjour\nDofus"),
+            font_asset: Some(&font),
+            style: &style,
+            custom: &json!({}),
+        });
+        assert_eq!(
+            line,
+            "    TextElement#title 320x40 text=\"Bonjour\\nDofus\" font=Dofus/Regular size=16px weight=Bold color=#FF8000 letterSpacing=0.5px paragraph=2px outline=1px pad=4,8,4,8"
+        );
+    }
+
+    #[test]
+    fn formats_ankama_nodes_like_the_historical_dumper() {
+        let style = json!({
+            "width": 640.0,
+            "height": 360.0,
+            "display": 0,
+            "visibility": 0,
+            "opacity": 1.0,
+            "backgroundColor": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.5},
+            "borderTopLeftRadius": 8.0,
+            "borderTopWidth": 1.0,
+            "position": 1,
+            "top": 12.0,
+            "flexShrink": 1.0,
+            "alignItems": 2,
+            "alignSelf": 0,
+            "justifyContent": 1
+        });
+        let custom = json!({
+            "title": "Confirmation",
+            "isModal": true,
+            "showCloseButton": true,
+            "headerStyle": 2
+        });
+        let line = legacy_node_line(LegacyNode {
+            depth: 0,
+            type_name: "Core.UILogic.Components.Figma.WindowFigma",
+            name: "popup",
+            tooltip: "Fermer",
+            text: None,
+            font_asset: None,
+            style: &style,
+            custom: &custom,
+        });
+        assert_eq!(
+            line,
+            "  WindowFigma#popup 640x360 tooltip=\"Fermer\" title=\"Confirmation\" isModal hasClose headerStyle=2 bg=#00000080 radius=8px border=1px pos=Absolute top=12 alignItems=Center justify=Center"
+        );
     }
 }

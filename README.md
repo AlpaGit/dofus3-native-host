@@ -78,12 +78,15 @@ présent sur disque, mais le host ne le charge plus aux lancements suivants.
 - Remplace et élargit l’ancien mod MelonLoader `DofusFontDumper`.
 - `F11` exporte progressivement les arbres UI Toolkit et `F12` ajoute les
   styles/layouts résolus, sans monopoliser une frame Unity.
+- Restaure le fichier historique exact `UserData/dofus-font-dumper.log` avec
+  ses en-têtes `UIDocument`, sa hiérarchie DFS indentée et ses lignes compactes
+  `Type#name largeur×hauteur text/font/styles`.
 - `F10` inventorie tous les `FontAsset`, leur famille, style, police source et
   textures d’atlas.
 - Capture automatiquement les résolutions dynamiques
   `UnityEngine.Font -> TextCore FontAsset`.
-- Produit des JSON/JSONL structurés et un CSV dédié aux textes, chemins UI et
-  polices réellement utilisées.
+- Conserve aussi les JSON/JSONL structurés et un CSV dédié aux textes, chemins
+  UI et polices réellement utilisées.
 - Requiert l’ABI v7 pour le test d’héritage IL2CPP, les chaînes UTF-8 sûres et
   le dispatch des méthodes virtuelles.
 - Sorties : `NativeMods/DofusInterfaceAnalyzer/<session>/`.

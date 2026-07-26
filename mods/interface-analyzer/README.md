@@ -8,7 +8,12 @@ Portage Rust enrichi de l'ancien `DofusFontDumper`.
 - Les résolutions dynamiques `Font -> FontAsset` sont capturées
   automatiquement par hook.
 
-Les fichiers restent locaux dans
+Le fichier principal retrouve son emplacement historique exact :
+`UserData/dofus-font-dumper.log`. Chaque pression sur `F11` ou `F12` y ajoute
+les en-têtes `UIDocument`, un parcours DFS indenté et les lignes compactes par
+`VisualElement`.
+
+Les JSONL et CSV restent disponibles en complément dans
 `NativeMods/DofusInterfaceAnalyzer/<session>/`.
 
 L'ancienne API HTTP capable de charger une assembly .NET n'est pas reproduite :
